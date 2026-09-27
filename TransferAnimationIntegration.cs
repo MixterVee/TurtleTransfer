@@ -309,18 +309,19 @@ internal static class TransferAnimationIntegration
 
             using var ridge = new GraphicsPath();
             ridge.StartFigure();
-            ridge.AddLine(area.Left - 12, area.Bottom);
-            ridge.AddLine(area.Left - 12, horizon + 18);
+            ridge.AddLine(
+                new PointF(area.Left - 12, area.Bottom),
+                new PointF(area.Left - 12, horizon + 18));
 
             for (var x = area.Left - 12; x <= area.Right + 24; x += 44)
             {
                 var y = horizon
                     + (float)Math.Sin(x * 0.013 + seconds * 0.04) * 5f
                     + (float)Math.Sin(x * 0.028) * 7f;
-                ridge.AddLine(x, y);
+                ridge.AddLine(ridge.GetLastPoint(), new PointF(x, y));
             }
 
-            ridge.AddLine(area.Right + 24, area.Bottom);
+            ridge.AddLine(ridge.GetLastPoint(), new PointF(area.Right + 24, area.Bottom));
             ridge.CloseFigure();
             g.FillPath(brush, ridge);
         }
