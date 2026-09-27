@@ -90,7 +90,7 @@ internal static class TransferAnimationIntegration
         {
             _background = DecodeArtwork(TransferAnimationOceanBackground.Data);
             _turtle = DecodeArtwork(TransferAnimationTurtleSprite.Data);
-            _foreground = DecodeArtwork(TransferAnimationOceanForeground.Data);
+            _foreground = null;
         }
 
         private static Bitmap? DecodeArtwork(string base64)
