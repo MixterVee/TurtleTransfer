@@ -26,6 +26,8 @@ internal static class TransferAnimationIntegration
         private readonly List<ParticleSeed> _particles = [];
 
         private Bitmap? _background;
+        private Bitmap? _backgroundFrame;
+        private Size _backgroundFrameSize = Size.Empty;
         private Bitmap? _turtle;
         private Bitmap? _turtleBody;
         private Bitmap? _turtleNearFlipper;
@@ -74,7 +76,8 @@ internal static class TransferAnimationIntegration
             LoadArtwork();
 
             _grid.Paint += GridOnPaint;
-            _timer = new System.Windows.Forms.Timer { Interval = 40 };
+            _grid.Resize += (_, _) => ResetBackgroundFrame();
+            _timer = new System.Windows.Forms.Timer { Interval = 16 };
             _timer.Tick += OnTick;
             _timer.Start();
 
@@ -84,6 +87,7 @@ internal static class TransferAnimationIntegration
                 _timer.Dispose();
                 _grid.Paint -= GridOnPaint;
                 _background?.Dispose();
+                _backgroundFrame?.Dispose();
                 _turtle?.Dispose();
                 _turtleBody?.Dispose();
                 _turtleNearFlipper?.Dispose();
@@ -98,8 +102,44 @@ internal static class TransferAnimationIntegration
             _turtle = DecodeArtwork(TransferAnimationTurtleSprite.Data);
             _foreground = null;
 
+            ResetBackgroundFrame();
+
             if (_turtle is not null)
                 BuildTurtleLayers(_turtle);
+        }
+
+        private void ResetBackgroundFrame()
+        {
+            _backgroundFrame?.Dispose();
+            _backgroundFrame = null;
+            _backgroundFrameSize = Size.Empty;
+        }
+
+        private void EnsureBackgroundFrame(Size size)
+        {
+            if (_background is null || size.Width <= 0 || size.Height <= 0)
+                return;
+
+            if (_backgroundFrame is not null && _backgroundFrameSize == size)
+                return;
+
+            ResetBackgroundFrame();
+
+            _backgroundFrame = new Bitmap(size.Width, size.Height, PixelFormat.Format32bppPArgb);
+            using var g = Graphics.FromImage(_backgroundFrame);
+            g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+            g.CompositingQuality = CompositingQuality.HighQuality;
+            g.PixelOffsetMode = PixelOffsetMode.HighQuality;
+
+            DrawImageCover(
+                g,
+                _background,
+                new Rectangle(0, 0, size.Width, size.Height),
+                0,
+                0,
+                0.78f);
+
+            _backgroundFrameSize = size;
         }
 
         private void BuildTurtleLayers(Bitmap source)
@@ -302,10 +342,17 @@ internal static class TransferAnimationIntegration
                 var ink = ContrastInk(_grid.BackgroundColor);
 
                 if (_background is not null)
-                    DrawImageCover(g, _background, area,
-                        (float)Math.Sin(seconds * 0.10) * 5f, 0, 0.78f);
+                {
+                    EnsureBackgroundFrame(area.Size);
+                    if (_backgroundFrame is not null)
+                        g.DrawImageUnscaled(_backgroundFrame, area.Left, area.Top);
+                    else
+                        DrawFallbackWater(g, area, ink);
+                }
                 else
+                {
                     DrawFallbackWater(g, area, ink);
+                }
 
                 DrawLightRays(g, area, ink, seconds);
                 DrawParticles(g, area, ink, seconds, state, front: false);
@@ -353,8 +400,8 @@ internal static class TransferAnimationIntegration
             {
                 case AnimationState.Transferring:
                     x = Lerp(area.Left - halfWidth - 25, area.Right + halfWidth + 25, (float)_travel);
-                    y = centerY + (float)Math.Sin(seconds * 0.95) * 7f;
-                    angle = (float)Math.Sin(seconds * 1.18) * 1.25f;
+                    y = centerY + (float)Math.Sin(seconds * 0.95) * 8.5f;
+                    angle = (float)Math.Sin(seconds * 1.18) * 1.55f;
                     alpha = 1.0f;
                     break;
 
@@ -387,20 +434,20 @@ internal static class TransferAnimationIntegration
                     return;
             }
 
-            var stroke = (float)Math.Sin(seconds * 2.15);
+            var stroke = (float)Math.Sin(seconds * 2.30);
             var activeStroke = state is AnimationState.Transferring or AnimationState.Completing;
-            var nearFlipperAngle = activeStroke ? stroke * 6.5f :
-                state == AnimationState.Paused ? stroke * 1.4f : 0f;
-            var farFlipperAngle = activeStroke ? -stroke * 5.2f :
-                state == AnimationState.Paused ? -stroke * 1.0f : 0f;
+            var nearFlipperAngle = activeStroke ? stroke * 9.0f :
+                state == AnimationState.Paused ? stroke * 1.8f : 0f;
+            var farFlipperAngle = activeStroke ? -stroke * 7.2f :
+                state == AnimationState.Paused ? -stroke * 1.3f : 0f;
 
             if (activeStroke)
             {
                 // A tiny pitch and surge on the power stroke makes the motion read as propulsion
                 // rather than a sprite simply sliding across the screen.
-                angle += stroke * 0.28f;
-                y += stroke * 1.1f;
-                x += Math.Max(0f, -stroke) * 2.6f;
+                angle += stroke * 0.38f;
+                y += stroke * 1.6f;
+                x += Math.Max(0f, -stroke) * 3.8f;
             }
 
             if (_turtleBody is null || _turtleNearFlipper is null || _turtleFarFlipper is null)
