@@ -27,6 +27,7 @@ internal static class Program
         RemoteMonitorIntegration.Attach(form);
         RemoteFirewallIntegration.Ensure(form);
         RemoteRelayIntegration.Attach(form);
+        TransferAnimationIntegration.Attach(form);
         MainWindowSafetyIntegration.Attach(form);
         TurtleBranding.Apply(form);
         Application.Run(form);
