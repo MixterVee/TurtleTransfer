@@ -7,5 +7,5 @@ internal static partial class TransferAnimationOceanBackground
 
 internal static partial class TransferAnimationTurtleSprite
 {
-    internal static string Data => C0 + C1 + C2;
+    internal static string Data => C0A + C0B + C1 + C2;
 }
