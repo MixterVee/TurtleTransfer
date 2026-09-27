@@ -8,6 +8,7 @@ public sealed class AppSettings
     public string SpeedLimitText { get; set; } = "2 Mbps";
     public string TransferOperation { get; set; } = "Copy";
     public string WhenFinishedAction { get; set; } = "Do nothing";
+    public bool TransferAnimationEnabled { get; set; } = true;
     public List<string> RecentDestinations { get; set; } = [];
     public List<NamedDestination> NamedDestinations { get; set; } = [];
 
