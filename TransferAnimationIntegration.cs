@@ -294,8 +294,8 @@ internal static class TransferAnimationIntegration
                     area.Left + area.Width * 0.83f, floorY - 7,
                     area.Right + 10, floorY + 7,
                     area.Right + 14, floorY + 8);
-                sand.AddLine(area.Right + 14, area.Bottom + 4);
-                sand.AddLine(area.Left - 14, area.Bottom + 4);
+                sand.AddLine(sand.GetLastPoint(), new PointF(area.Right + 14, area.Bottom + 4));
+                sand.AddLine(sand.GetLastPoint(), new PointF(area.Left - 14, area.Bottom + 4));
                 sand.CloseFigure();
                 g.FillPath(sandFill, sand);
                 g.DrawPath(sandPen, sand);
