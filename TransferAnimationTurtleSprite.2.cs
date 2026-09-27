@@ -1,0 +1,2 @@
+namespace CampTransfer;
+internal static partial class TransferAnimationTurtleSprite { internal const string C2 = "lIIsgO8GCOublu36vEvvNI4Z9a89lrjJjd1TJCNaWvQepZwStmxTLO/fPTVp0qRJkyZNmjRp0qRJkyZNmjRp0qRJkyZNmjRp0qRJkyZNmjRp0qRJkyZNmjRp0qRJkyZNmjRp0uT9yP8DVnJTZKnwzG0AAAAASUVORK5CYII="; }

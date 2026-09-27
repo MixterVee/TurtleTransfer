@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using System.Drawing.Drawing2D;
+using System.Drawing.Imaging;
 using System.Reflection;
 
 namespace CampTransfer;
@@ -20,27 +21,28 @@ internal static class TransferAnimationIntegration
         private readonly CheckBox _toggle;
         private readonly System.Windows.Forms.Timer _timer;
         private readonly Random _random = new(45827);
-        private readonly List<BubbleSeed> _bubbles = [];
+        private readonly List<BubbleSeed> _backBubbles = [];
+        private readonly List<BubbleSeed> _frontBubbles = [];
         private readonly List<ParticleSeed> _particles = [];
-        private readonly List<FishSeed> _fish = [];
+
+        private Bitmap? _background;
+        private Bitmap? _turtle;
+        private Bitmap? _foreground;
 
         private DateTime _lastTickUtc = DateTime.UtcNow;
         private DateTime _completionUntilUtc = DateTime.MinValue;
-        private double _swimX = -260;
         private bool _wasTransferActive;
+        private double _travel = -0.18;
 
         public Controller(MainForm form)
         {
             _form = form;
-
             _grid = FindControls<DataGridView>(form).FirstOrDefault()
                 ?? throw new InvalidOperationException("Transfer queue grid was not found.");
 
-            if (_grid.DataSource is not BindingSource bindingSource ||
-                bindingSource.DataSource is not BindingList<TransferItem> queue)
-            {
+            if (_grid.DataSource is not BindingSource source ||
+                source.DataSource is not BindingList<TransferItem> queue)
                 throw new InvalidOperationException("Transfer queue data source was not found.");
-            }
 
             _queue = queue;
             _settings = GetSettings(form) ?? AppSettings.Load();
@@ -53,9 +55,9 @@ internal static class TransferAnimationIntegration
                 Margin = new Padding(10, 7, 2, 0)
             };
 
-            var toolbar = FindControls<FlowLayoutPanel>(form)
-                .FirstOrDefault(p => p.Controls.OfType<Button>().Any(b => b.Text == "Start"));
-            toolbar?.Controls.Add(_toggle);
+            FindControls<FlowLayoutPanel>(form)
+                .FirstOrDefault(p => p.Controls.OfType<Button>().Any(b => b.Text == "Start"))
+                ?.Controls.Add(_toggle);
 
             _toggle.CheckedChanged += (_, _) =>
             {
@@ -66,9 +68,9 @@ internal static class TransferAnimationIntegration
 
             EnableDoubleBuffering(_grid);
             SeedScene();
+            LoadArtwork();
 
             _grid.Paint += GridOnPaint;
-
             _timer = new System.Windows.Forms.Timer { Interval = 40 };
             _timer.Tick += OnTick;
             _timer.Start();
@@ -78,13 +80,38 @@ internal static class TransferAnimationIntegration
                 _timer.Stop();
                 _timer.Dispose();
                 _grid.Paint -= GridOnPaint;
+                _background?.Dispose();
+                _turtle?.Dispose();
+                _foreground?.Dispose();
             };
+        }
+
+        private void LoadArtwork()
+        {
+            _background = DecodeArtwork(TransferAnimationOceanBackground.Data);
+            _turtle = DecodeArtwork(TransferAnimationTurtleSprite.Data);
+            _foreground = null;
+        }
+
+        private static Bitmap? DecodeArtwork(string base64)
+        {
+            try
+            {
+                var bytes = Convert.FromBase64String(base64);
+                using var stream = new MemoryStream(bytes, writable: false);
+                using var source = Image.FromStream(stream);
+                return new Bitmap(source);
+            }
+            catch
+            {
+                return null;
+            }
         }
 
         private void OnTick(object? sender, EventArgs e)
         {
             var now = DateTime.UtcNow;
-            var dt = Math.Clamp((now - _lastTickUtc).TotalSeconds, 0, 0.2);
+            var dt = Math.Clamp((now - _lastTickUtc).TotalSeconds, 0, 0.20);
             _lastTickUtc = now;
 
             var state = GetState(now);
@@ -100,13 +127,13 @@ internal static class TransferAnimationIntegration
 
             if (state == AnimationState.Transferring)
             {
-                _swimX += 30 * dt;
-                if (_swimX > _grid.ClientSize.Width + 280)
-                    _swimX = -280;
+                _travel += dt * 0.055;
+                if (_travel > 1.18)
+                    _travel = -0.18;
             }
 
             var area = GetAnimationArea();
-            if (area.Height > 20)
+            if (area.Width > 0 && area.Height > 0)
                 _grid.Invalidate(area);
         }
 
@@ -139,10 +166,9 @@ internal static class TransferAnimationIntegration
             foreach (DataGridViewRow row in _grid.Rows)
             {
                 if (!row.Visible) continue;
-
                 var rect = _grid.GetRowDisplayRectangle(row.Index, cutOverflow: true);
-                if (rect.Height <= 0) continue;
-                top = Math.Max(top, rect.Bottom);
+                if (rect.Height > 0)
+                    top = Math.Max(top, rect.Bottom);
             }
 
             top = Math.Min(_grid.ClientSize.Height, top + 2);
@@ -178,58 +204,35 @@ internal static class TransferAnimationIntegration
                 g.CompositingQuality = CompositingQuality.HighQuality;
                 g.InterpolationMode = InterpolationMode.HighQualityBicubic;
 
-                var tone = ContrastTone(_grid.BackgroundColor);
                 var seconds = Environment.TickCount64 / 1000.0;
+                var ink = ContrastInk(_grid.BackgroundColor);
 
-                DrawWaterBackground(g, area, tone, seconds);
-                DrawLightRays(g, area, tone, seconds);
-                DrawDistantTerrain(g, area, tone, seconds);
-                DrawParticles(g, area, tone, seconds, state, foreground: false);
-                DrawBubbleField(g, area, tone, seconds, state, foreground: false);
-                DrawDistantFish(g, area, tone, seconds, state);
-                DrawOceanHints(g, area, tone, state, seconds);
-                DrawSeafloor(g, area, tone, state, seconds);
+                if (_background is not null)
+                    DrawImageCover(g, _background, area,
+                        (float)Math.Sin(seconds * 0.10) * 5f, 0, 0.78f);
+                else
+                    DrawFallbackWater(g, area, ink);
 
-                var centerY = area.Top + area.Height * 0.40;
-                var scale = Math.Clamp(area.Height / 190f, 1.45f, 2.20f);
+                DrawLightRays(g, area, ink, seconds);
+                DrawParticles(g, area, ink, seconds, state, front: false);
+                DrawBubbles(g, area, ink, seconds, state, _backBubbles);
 
-                if (state == AnimationState.Transferring)
-                {
-                    var x = area.Left + (float)_swimX;
-                    var y = (float)(centerY + Math.Sin(seconds * 1.0) * 7);
-                    DrawTurtle(g, x, y, scale, tone, 245, seconds, true);
-                }
-                else if (state == AnimationState.Paused)
-                {
-                    var x = (float)Math.Clamp(area.Left + _swimX, area.Left + 145, area.Right - 315);
-                    var y = (float)(centerY + Math.Sin(seconds * 1.35) * 4);
-                    DrawTurtle(g, x, y, scale, tone, 218, seconds * 0.35, false);
-                }
-                else if (state == AnimationState.Completing)
+                DrawTurtle(g, area, seconds, state);
+
+                DrawBubbles(g, area, ink, seconds, state, _frontBubbles);
+                DrawParticles(g, area, ink, seconds, state, front: true);
+
+                if (_foreground is not null)
+                    DrawImageCover(g, _foreground, area,
+                        (float)Math.Sin(seconds * 0.15 + 1.1) * -4f, 0, 0.88f);
+
+                if (state == AnimationState.Completing)
                 {
                     var remaining = Math.Clamp((_completionUntilUtc - now).TotalSeconds / 3.0, 0, 1);
-                    var alpha = (int)(240 * remaining);
-                    var x = area.Left + area.Width * 0.61f;
-                    var y = (float)(centerY + Math.Sin(seconds * 1.05) * 5);
-                    DrawTurtle(g, x, y, scale, tone, alpha, seconds, true);
-                    DrawCelebrationBubbles(g, area, tone, seconds, (int)(110 * remaining));
-                }
-                else if (state == AnimationState.Waiting)
-                {
-                    DrawTurtle(
-                        g,
-                        area.Left + area.Width * 0.67f,
-                        (float)centerY,
-                        scale * 0.90f,
-                        tone,
-                        125,
-                        seconds * 0.20,
-                        false);
+                    DrawCompletionBurst(g, area, ink, seconds, (int)(110 * remaining));
                 }
 
-                DrawBubbleField(g, area, tone, seconds, state, foreground: true);
-                DrawForegroundPlants(g, area, tone, seconds, state);
-                DrawParticles(g, area, tone, seconds, state, foreground: true);
+                DrawVignette(g, area, ink);
             }
             finally
             {
@@ -237,652 +240,219 @@ internal static class TransferAnimationIntegration
             }
         }
 
-        private static void DrawWaterBackground(Graphics g, Rectangle area, int tone, double seconds)
+        private void DrawTurtle(Graphics g, Rectangle area, double seconds, AnimationState state)
         {
-            var dark = tone > 128;
-            var top = dark ? Color.FromArgb(26, 31, 36) : Color.FromArgb(240, 242, 244);
-            var bottom = dark ? Color.FromArgb(48, 53, 58) : Color.FromArgb(211, 216, 220);
+            if (_turtle is null)
+                return;
 
-            using var water = new LinearGradientBrush(
-                new Point(area.Left, area.Top),
-                new Point(area.Left, area.Bottom),
-                top,
-                bottom);
+            var targetHeight = Math.Clamp(area.Height * 0.56f, 145f, 315f);
+            var scale = targetHeight / _turtle.Height;
+            var halfWidth = _turtle.Width * scale / 2f;
+            var centerY = area.Top + area.Height * 0.43f;
 
-            g.FillRectangle(water, area);
+            float x;
+            float y;
+            float angle;
+            float alpha;
 
-            using var haze = new SolidBrush(Color.FromArgb(16, tone, tone, tone));
-            g.FillRectangle(haze, area.Left, area.Top, area.Width, Math.Max(1, (int)(area.Height * 0.25f)));
-
-            using var shimmer = new Pen(Color.FromArgb(18, tone, tone, tone), 1.0f);
-            for (var row = 0; row < 3; row++)
+            switch (state)
             {
-                using var path = new GraphicsPath();
-                var first = true;
-                var baseY = area.Top + 14 + row * 17;
+                case AnimationState.Transferring:
+                    x = Lerp(area.Left - halfWidth - 25, area.Right + halfWidth + 25, (float)_travel);
+                    y = centerY + (float)Math.Sin(seconds * 0.95) * 8f;
+                    angle = (float)Math.Sin(seconds * 1.30) * 1.7f;
+                    alpha = 1.0f;
+                    break;
 
-                for (var x = area.Left - 10; x <= area.Right + 10; x += 13)
-                {
-                    var y = baseY + Math.Sin(x * 0.036 + seconds * 0.80 + row * 1.3) * 2.2;
-                    if (first)
-                    {
-                        path.StartFigure();
-                        path.AddLine(x, (float)y, x + 0.1f, (float)y);
-                        first = false;
-                    }
-                    else
-                    {
-                        path.AddLine(path.GetLastPoint(), new PointF(x, (float)y));
-                    }
-                }
+                case AnimationState.Paused:
+                    x = Math.Clamp(
+                        Lerp(area.Left + halfWidth, area.Right - halfWidth, (float)Math.Clamp(_travel, 0, 1)),
+                        area.Left + halfWidth,
+                        area.Right - halfWidth);
+                    y = centerY + (float)Math.Sin(seconds * 1.25) * 4f;
+                    angle = (float)Math.Sin(seconds * 0.80) * 0.8f;
+                    alpha = 0.94f;
+                    break;
 
-                g.DrawPath(shimmer, path);
+                case AnimationState.Completing:
+                    x = area.Left + area.Width * 0.60f;
+                    y = centerY + (float)Math.Sin(seconds * 0.95) * 5f;
+                    angle = (float)Math.Sin(seconds * 1.10) * 1.3f;
+                    alpha = 1.0f;
+                    break;
+
+                case AnimationState.Waiting:
+                    x = area.Left + area.Width * 0.68f;
+                    y = centerY;
+                    angle = 0;
+                    alpha = 0.45f;
+                    scale *= 0.92f;
+                    break;
+
+                default:
+                    return;
             }
+
+            // A tiny breathing/paddling illusion keeps the photographic sprite from feeling static.
+            var swimPulse = state == AnimationState.Transferring
+                ? 1f + (float)Math.Sin(seconds * 2.25) * 0.012f
+                : 1f;
+
+            DrawCenteredImage(g, _turtle, x, y, scale, scale * swimPulse, angle, alpha);
         }
 
-        private static void DrawLightRays(Graphics g, Rectangle area, int tone, double seconds)
+        private static void DrawFallbackWater(Graphics g, Rectangle area, Color ink)
+        {
+            using var brush = new LinearGradientBrush(
+                new Point(area.Left, area.Top),
+                new Point(area.Left, area.Bottom),
+                Color.FromArgb(20, ink),
+                Color.FromArgb(48, ink));
+            g.FillRectangle(brush, area);
+        }
+
+        private static void DrawLightRays(Graphics g, Rectangle area, Color ink, double seconds)
         {
             for (var i = 0; i < 4; i++)
             {
-                var sway = (float)Math.Sin(seconds * 0.23 + i * 0.9) * 18f;
-                var topX = area.Left + (i + 1) * area.Width / 5f + sway;
-                var topW = 14f + i * 4f;
-                var bottomW = 58f + i * 15f;
+                var sway = (float)Math.Sin(seconds * 0.23 + i * 0.85) * 15f;
+                var x = area.Left + (i + 1) * area.Width / 5f + sway;
 
                 using var path = new GraphicsPath();
                 path.AddPolygon([
-                    new PointF(topX - topW, area.Top),
-                    new PointF(topX + topW, area.Top),
-                    new PointF(topX + bottomW, area.Bottom),
-                    new PointF(topX - bottomW, area.Bottom)
+                    new PointF(x - 11, area.Top),
+                    new PointF(x + 11, area.Top),
+                    new PointF(x + 55 + i * 10, area.Bottom),
+                    new PointF(x - 55 - i * 10, area.Bottom)
                 ]);
 
-                using var brush = new SolidBrush(Color.FromArgb(9 + i * 2, tone, tone, tone));
+                using var brush = new SolidBrush(Color.FromArgb(9 + i * 2, ink));
                 g.FillPath(brush, path);
             }
         }
 
-        private static void DrawDistantTerrain(Graphics g, Rectangle area, int tone, double seconds)
-        {
-            var horizon = area.Bottom - Math.Max(56f, area.Height * 0.23f);
-            using var brush = new SolidBrush(Color.FromArgb(20, tone, tone, tone));
-
-            using var ridge = new GraphicsPath();
-            ridge.StartFigure();
-            ridge.AddLine(
-                new PointF(area.Left - 12, area.Bottom),
-                new PointF(area.Left - 12, horizon + 18));
-
-            for (var x = area.Left - 12; x <= area.Right + 24; x += 44)
-            {
-                var y = horizon
-                    + (float)Math.Sin(x * 0.013 + seconds * 0.04) * 5f
-                    + (float)Math.Sin(x * 0.028) * 7f;
-                ridge.AddLine(ridge.GetLastPoint(), new PointF(x, y));
-            }
-
-            ridge.AddLine(ridge.GetLastPoint(), new PointF(area.Right + 24, area.Bottom));
-            ridge.CloseFigure();
-            g.FillPath(brush, ridge);
-        }
-
         private void DrawParticles(
-            Graphics g,
-            Rectangle area,
-            int tone,
-            double seconds,
-            AnimationState state,
-            bool foreground)
+            Graphics g, Rectangle area, Color ink, double seconds,
+            AnimationState state, bool front)
         {
             var alpha = state switch
             {
-                AnimationState.Transferring => foreground ? 22 : 15,
-                AnimationState.Paused => foreground ? 15 : 10,
-                AnimationState.Completing => foreground ? 26 : 18,
-                AnimationState.Waiting => foreground ? 10 : 7,
+                AnimationState.Transferring => front ? 25 : 16,
+                AnimationState.Paused => front ? 15 : 10,
+                AnimationState.Completing => front ? 28 : 18,
+                AnimationState.Waiting => front ? 10 : 7,
                 _ => 0
             };
 
             if (alpha == 0) return;
-
-            using var brush = new SolidBrush(Color.FromArgb(alpha, tone, tone, tone));
+            using var brush = new SolidBrush(Color.FromArgb(alpha, ink));
 
             foreach (var p in _particles)
             {
-                if (p.Foreground != foreground) continue;
+                if (p.Front != front) continue;
 
                 var cycle = (seconds * p.Speed + p.Phase) % 1.0;
                 if (cycle < 0) cycle += 1.0;
 
                 var x = area.Left + (float)(p.XRatio * area.Width)
-                    + (float)Math.Sin(seconds * 0.43 + p.Phase * 9) * p.Drift;
-                var y = area.Bottom - (float)(cycle * Math.Max(24, area.Height - 14));
+                    + (float)Math.Sin(seconds * 0.42 + p.Phase * 8) * p.Drift;
+                var y = area.Bottom - (float)(cycle * Math.Max(22, area.Height - 14));
 
                 g.FillEllipse(brush, x - p.Size / 2f, y - p.Size / 2f, p.Size, p.Size);
             }
         }
 
-        private void DrawDistantFish(
-            Graphics g,
-            Rectangle area,
-            int tone,
-            double seconds,
-            AnimationState state)
+        private static void DrawBubbles(
+            Graphics g, Rectangle area, Color ink, double seconds,
+            AnimationState state, IEnumerable<BubbleSeed> bubbles)
         {
-            if (state == AnimationState.Waiting)
-                return;
-
-            foreach (var fish in _fish)
-            {
-                var t = (seconds * fish.Speed + fish.Phase) % 1.0;
-                if (t < 0) t += 1.0;
-
-                var x = fish.RightToLeft
-                    ? area.Right + 25 - (float)t * (area.Width + 50)
-                    : area.Left - 25 + (float)t * (area.Width + 50);
-
-                var y = area.Top + area.Height * fish.YRatio
-                    + (float)Math.Sin(seconds * 0.63 + fish.Phase * 7) * 4f;
-
-                DrawFish(g, x, y, fish.Size, fish.RightToLeft, tone);
-            }
-        }
-
-        private static void DrawFish(Graphics g, float x, float y, float size, bool rightToLeft, int tone)
-        {
-            var saved = g.Save();
-            try
-            {
-                g.TranslateTransform(x, y);
-                if (rightToLeft) g.ScaleTransform(-1, 1);
-
-                using var brush = new SolidBrush(Color.FromArgb(25, tone, tone, tone));
-                g.FillEllipse(brush, -size * 0.42f, -size * 0.19f, size * 0.70f, size * 0.38f);
-
-                using var tail = new GraphicsPath();
-                tail.AddPolygon([
-                    new PointF(-size * 0.36f, 0),
-                    new PointF(-size * 0.69f, -size * 0.27f),
-                    new PointF(-size * 0.69f, size * 0.27f)
-                ]);
-                g.FillPath(brush, tail);
-            }
-            finally
-            {
-                g.Restore(saved);
-            }
-        }
-
-        private static void DrawForegroundPlants(
-            Graphics g,
-            Rectangle area,
-            int tone,
-            double seconds,
-            AnimationState state)
-        {
-            if (state == AnimationState.Waiting)
-                return;
-
-            DrawForegroundKelp(g, area.Left + 28, area.Bottom + 4, 92, tone, seconds, 0.2);
-            DrawForegroundKelp(g, area.Right - 42, area.Bottom + 4, 106, tone, seconds, 1.7);
-        }
-
-        private static void DrawForegroundKelp(
-            Graphics g,
-            float x,
-            float baseY,
-            float height,
-            int tone,
-            double seconds,
-            double phase)
-        {
-            using var pen = new Pen(Color.FromArgb(32, tone, tone, tone), 2.2f)
-            {
-                StartCap = LineCap.Round,
-                EndCap = LineCap.Round
-            };
-
-            for (var blade = 0; blade < 5; blade++)
-            {
-                var offset = (blade - 2f) * 7f;
-                var sway = (float)Math.Sin(seconds * 0.37 + phase + blade * 0.55) * (9f + blade);
-                var h = height * (0.68f + (blade % 3) * 0.14f);
-
-                using var path = new GraphicsPath();
-                path.StartFigure();
-                path.AddBezier(
-                    x + offset, baseY,
-                    x + offset - sway * 0.24f, baseY - h * 0.34f,
-                    x + offset + sway * 0.55f, baseY - h * 0.70f,
-                    x + offset + sway, baseY - h);
-
-                g.DrawPath(pen, path);
-            }
-        }
-
-        private static void DrawOceanHints(
-            Graphics g,
-            Rectangle area,
-            int tone,
-            AnimationState state,
-            double seconds)
-        {
-            if (state is AnimationState.Idle or AnimationState.Waiting)
-                return;
-
-            using var pen = new Pen(Color.FromArgb(24, tone, tone, tone), 1.2f);
-
-            for (var line = 0; line < 4; line++)
-            {
-                var yBase = area.Bottom - 24 - line * 24;
-                using var path = new GraphicsPath();
-                var started = false;
-
-                for (var x = area.Left - 30; x <= area.Right + 30; x += 16)
-                {
-                    var y = yBase + Math.Sin((x * 0.021) + seconds * 0.52 + line * 0.8) * 4.5;
-                    if (!started)
-                    {
-                        path.StartFigure();
-                        path.AddLine(x, (float)y, x + 0.1f, (float)y);
-                        started = true;
-                    }
-                    else
-                    {
-                        path.AddLine(path.GetLastPoint(), new PointF(x, (float)y));
-                    }
-                }
-
-                g.DrawPath(pen, path);
-            }
-        }
-
-        private static void DrawSeafloor(
-            Graphics g,
-            Rectangle area,
-            int tone,
-            AnimationState state,
-            double seconds)
-        {
-            if (state == AnimationState.Idle)
-                return;
-
-            var quiet = state == AnimationState.Waiting;
-            var alpha = quiet ? 18 : 38;
-            var floorY = area.Bottom - Math.Max(34f, area.Height * 0.15f);
-
-            using var sandFill = new SolidBrush(Color.FromArgb(alpha, tone, tone, tone));
-            using var sandPen = new Pen(Color.FromArgb(alpha + 13, tone, tone, tone), 1.1f);
-
-            using (var sand = new GraphicsPath())
-            {
-                sand.StartFigure();
-                sand.AddBezier(
-                    area.Left - 12, floorY + 8,
-                    area.Left + area.Width * 0.25f, floorY - 6,
-                    area.Left + area.Width * 0.48f, floorY + 11,
-                    area.Left + area.Width * 0.69f, floorY + 1);
-                sand.AddBezier(
-                    area.Left + area.Width * 0.69f, floorY + 1,
-                    area.Left + area.Width * 0.83f, floorY - 7,
-                    area.Right + 10, floorY + 7,
-                    area.Right + 14, floorY + 8);
-                sand.AddLine(sand.GetLastPoint(), new PointF(area.Right + 14, area.Bottom + 4));
-                sand.AddLine(sand.GetLastPoint(), new PointF(area.Left - 14, area.Bottom + 4));
-                sand.CloseFigure();
-                g.FillPath(sandFill, sand);
-                g.DrawPath(sandPen, sand);
-            }
-
-            DrawRock(g, area.Left + area.Width * 0.15f, area.Bottom - 17, 34, 17, tone, alpha + 24);
-            DrawRock(g, area.Left + area.Width * 0.20f, area.Bottom - 13, 19, 10, tone, alpha + 13);
-            DrawRock(g, area.Left + area.Width * 0.79f, area.Bottom - 18, 38, 19, tone, alpha + 22);
-            DrawRock(g, area.Left + area.Width * 0.84f, area.Bottom - 12, 21, 10, tone, alpha + 12);
-
-            DrawSeaGrassCluster(g, area.Left + area.Width * 0.08f, area.Bottom - 7, 46, tone, alpha + 22, seconds, 0.0);
-            DrawSeaGrassCluster(g, area.Left + area.Width * 0.28f, area.Bottom - 7, 58, tone, alpha + 22, seconds, 1.0);
-            DrawSeaGrassCluster(g, area.Left + area.Width * 0.66f, area.Bottom - 7, 50, tone, alpha + 20, seconds, 2.0);
-            DrawSeaGrassCluster(g, area.Left + area.Width * 0.91f, area.Bottom - 7, 61, tone, alpha + 24, seconds, 2.8);
-
-            DrawCoral(g, area.Left + area.Width * 0.41f, area.Bottom - 8, 38, tone, alpha + 23);
-            DrawCoral(g, area.Left + area.Width * 0.73f, area.Bottom - 8, 32, tone, alpha + 18);
-
-            using var smallPen = new Pen(Color.FromArgb(alpha + 28, tone, tone, tone), 1.05f);
-
-            // Shell.
-            var shellX = area.Left + area.Width * 0.55f;
-            var shellY = area.Bottom - 12;
-            g.DrawArc(smallPen, shellX - 8, shellY - 6, 16, 11, 180, 180);
-            g.DrawLine(smallPen, shellX, shellY - 5, shellX, shellY + 3);
-            g.DrawLine(smallPen, shellX - 5, shellY - 3, shellX - 2, shellY + 3);
-            g.DrawLine(smallPen, shellX + 5, shellY - 3, shellX + 2, shellY + 3);
-
-            // Small starfish-like bottom detail.
-            var starX = area.Left + area.Width * 0.34f;
-            var starY = area.Bottom - 13;
-            using var star = new GraphicsPath();
-            var points = new PointF[10];
-            for (var i = 0; i < points.Length; i++)
-            {
-                var angle = -Math.PI / 2 + i * Math.PI / 5;
-                var radius = i % 2 == 0 ? 8f : 3.4f;
-                points[i] = new PointF(
-                    starX + (float)Math.Cos(angle) * radius,
-                    starY + (float)Math.Sin(angle) * radius);
-            }
-            star.AddPolygon(points);
-            g.DrawPath(smallPen, star);
-        }
-
-        private static void DrawRock(
-            Graphics g,
-            float x,
-            float y,
-            float width,
-            float height,
-            int tone,
-            int alpha)
-        {
-            using var fill = new SolidBrush(Color.FromArgb(Math.Clamp(alpha / 2, 0, 100), tone, tone, tone));
-            using var pen = new Pen(Color.FromArgb(Math.Clamp(alpha, 0, 110), tone, tone, tone), 1f);
-            using var path = new GraphicsPath();
-            path.AddBezier(x - width / 2, y, x - width * 0.43f, y - height, x - width * 0.08f, y - height * 1.1f, x, y - height);
-            path.AddBezier(x, y - height, x + width * 0.27f, y - height * 1.05f, x + width * 0.48f, y - height * 0.50f, x + width / 2, y);
-            path.CloseFigure();
-            g.FillPath(fill, path);
-            g.DrawPath(pen, path);
-        }
-
-        private static void DrawSeaGrassCluster(
-            Graphics g,
-            float x,
-            float baseY,
-            float height,
-            int tone,
-            int alpha,
-            double seconds,
-            double phase)
-        {
-            using var pen = new Pen(Color.FromArgb(Math.Clamp(alpha, 0, 110), tone, tone, tone), 1.35f)
-            {
-                StartCap = LineCap.Round,
-                EndCap = LineCap.Round
-            };
-
-            for (var blade = 0; blade < 6; blade++)
-            {
-                var offset = (blade - 2.5f) * 4.0f;
-                var sway = (float)Math.Sin(seconds * 0.55 + phase + blade * 0.55) * (5.5f + blade * 0.35f);
-                var h = height * (0.62f + (blade % 3) * 0.16f);
-
-                using var grass = new GraphicsPath();
-                grass.StartFigure();
-                grass.AddBezier(
-                    x + offset, baseY,
-                    x + offset - sway * 0.20f, baseY - h * 0.34f,
-                    x + offset + sway * 0.55f, baseY - h * 0.68f,
-                    x + offset + sway, baseY - h);
-                g.DrawPath(pen, grass);
-            }
-        }
-
-        private static void DrawCoral(
-            Graphics g,
-            float x,
-            float baseY,
-            float height,
-            int tone,
-            int alpha)
-        {
-            using var pen = new Pen(Color.FromArgb(Math.Clamp(alpha, 0, 110), tone, tone, tone), 2.0f)
-            {
-                StartCap = LineCap.Round,
-                EndCap = LineCap.Round
-            };
-
-            g.DrawLine(pen, x, baseY, x, baseY - height);
-            g.DrawLine(pen, x, baseY - height * 0.55f, x - 10, baseY - height * 0.78f);
-            g.DrawLine(pen, x - 10, baseY - height * 0.78f, x - 13, baseY - height * 0.93f);
-            g.DrawLine(pen, x, baseY - height * 0.38f, x + 11, baseY - height * 0.61f);
-            g.DrawLine(pen, x + 11, baseY - height * 0.61f, x + 14, baseY - height * 0.80f);
-            g.DrawLine(pen, x, baseY - height * 0.72f, x + 8, baseY - height * 0.92f);
-        }
-
-        private void DrawBubbleField(
-            Graphics g,
-            Rectangle area,
-            int tone,
-            double seconds,
-            AnimationState state,
-            bool foreground)
-        {
-            var count = state switch
-            {
-                AnimationState.Transferring => 42,
-                AnimationState.Paused => 24,
-                AnimationState.Completing => 48,
-                AnimationState.Waiting => 12,
-                _ => 0
-            };
-
             var alpha = state switch
             {
-                AnimationState.Transferring => foreground ? 64 : 42,
-                AnimationState.Paused => foreground ? 40 : 28,
-                AnimationState.Completing => foreground ? 68 : 46,
-                AnimationState.Waiting => foreground ? 24 : 17,
+                AnimationState.Transferring => 70,
+                AnimationState.Paused => 42,
+                AnimationState.Completing => 78,
+                AnimationState.Waiting => 25,
                 _ => 0
             };
 
-            count = Math.Min(count, _bubbles.Count);
+            var speedScale = state == AnimationState.Paused ? 0.35 : 1.0;
 
-            for (var i = 0; i < count; i++)
+            foreach (var b in bubbles)
             {
-                // Split the same deterministic field into back/front layers.
-                if (((i % 4) == 0) != foreground)
-                    continue;
-
-                var seed = _bubbles[i];
-                var speedScale = state == AnimationState.Paused ? 0.32 : 1.0;
-                var cycle = (seconds * seed.Speed * speedScale + seed.Phase) % 1.0;
+                var cycle = (seconds * b.Speed * speedScale + b.Phase) % 1.0;
                 if (cycle < 0) cycle += 1.0;
 
-                var drift = Math.Sin(seconds * 0.70 + seed.Phase * 8 + i) * seed.Drift;
-                var x = area.Left + (float)(seed.XRatio * area.Width + drift);
-                var y = area.Bottom - 12 - (float)(cycle * Math.Max(34, area.Height - 26));
-                DrawBubble(g, x, y, seed.Radius, tone, alpha, seed.Highlight);
+                var x = area.Left + (float)(b.XRatio * area.Width)
+                    + (float)Math.Sin(seconds * 0.58 + b.Phase * 7) * b.Drift;
+                var y = area.Bottom - 10 - (float)(cycle * Math.Max(24, area.Height - 18));
+
+                using var pen = new Pen(Color.FromArgb(alpha, ink), Math.Max(1f, b.Radius * 0.13f));
+                g.DrawEllipse(pen, x - b.Radius, y - b.Radius, b.Radius * 2, b.Radius * 2);
+
+                if (b.Highlight && b.Radius > 3f)
+                {
+                    using var highlight = new Pen(Color.FromArgb(Math.Min(120, alpha + 25), Color.White), 0.9f);
+                    g.DrawArc(highlight,
+                        x - b.Radius * 0.55f,
+                        y - b.Radius * 0.58f,
+                        b.Radius * 0.9f,
+                        b.Radius * 0.9f,
+                        190, 100);
+                }
             }
         }
 
-        private static void DrawCelebrationBubbles(
-            Graphics g,
-            Rectangle area,
-            int tone,
-            double seconds,
-            int alpha)
+        private static void DrawCompletionBurst(
+            Graphics g, Rectangle area, Color ink, double seconds, int alpha)
         {
-            for (var i = 0; i < 36; i++)
+            for (var i = 0; i < 30; i++)
             {
-                var phase = (seconds * (0.16 + (i % 5) * 0.018) + i * 0.057) % 1.0;
-                var x = area.Left + area.Width * (0.18f + ((i * 37) % 63) / 100f);
-                x += (float)Math.Sin(seconds + i) * 12;
+                var phase = (seconds * (0.15 + (i % 5) * 0.018) + i * 0.061) % 1.0;
+                var x = area.Left + area.Width * (0.16f + ((i * 37) % 68) / 100f)
+                    + (float)Math.Sin(seconds + i) * 11f;
                 var y = area.Bottom - (float)(phase * area.Height);
-                var r = 3f + (i % 6) * 1.3f;
-                DrawBubble(g, x, y, r, tone, Math.Max(12, alpha - i), i % 3 != 0);
+                var r = 3f + (i % 5) * 1.3f;
+
+                using var pen = new Pen(Color.FromArgb(Math.Max(10, alpha - i * 2), ink), 1f);
+                g.DrawEllipse(pen, x - r, y - r, r * 2, r * 2);
             }
         }
 
-        private static void DrawBubble(
-            Graphics g,
-            float x,
-            float y,
-            float radius,
-            int tone,
-            int alpha,
-            bool highlight)
+        private static void DrawVignette(Graphics g, Rectangle area, Color ink)
         {
-            alpha = Math.Clamp(alpha, 0, 120);
-            if (alpha == 0) return;
+            var band = Math.Max(1, area.Height / 5);
 
-            using var pen = new Pen(Color.FromArgb(alpha, tone, tone, tone), Math.Max(1f, radius * 0.16f));
-            g.DrawEllipse(pen, x - radius, y - radius, radius * 2, radius * 2);
+            using var top = new LinearGradientBrush(
+                new Rectangle(area.Left, area.Top, area.Width, band),
+                Color.FromArgb(18, ink),
+                Color.Transparent,
+                LinearGradientMode.Vertical);
+            g.FillRectangle(top, area.Left, area.Top, area.Width, band);
 
-            if (!highlight || radius < 3f) return;
-
-            using var highlightPen = new Pen(
-                Color.FromArgb(Math.Min(110, alpha + 22), tone, tone, tone),
-                Math.Max(0.8f, radius * 0.11f));
-            var hr = radius * 0.42f;
-            g.DrawArc(highlightPen, x - radius * 0.46f, y - radius * 0.48f, hr, hr, 195, 105);
+            using var bottom = new LinearGradientBrush(
+                new Rectangle(area.Left, area.Bottom - band, area.Width, band),
+                Color.Transparent,
+                Color.FromArgb(24, ink),
+                LinearGradientMode.Vertical);
+            g.FillRectangle(bottom, area.Left, area.Bottom - band, area.Width, band);
         }
 
-        private static void DrawTurtle(
-            Graphics g,
-            float centerX,
-            float centerY,
-            float scale,
-            int tone,
-            int alpha,
-            double seconds,
-            bool swimming)
+        private static void DrawCenteredImage(
+            Graphics g, Image image, float centerX, float centerY,
+            float scaleX, float scaleY, float angle, float alpha)
         {
-            alpha = Math.Clamp(alpha, 0, 255);
-            if (alpha <= 0) return;
-
             var saved = g.Save();
             try
             {
                 g.TranslateTransform(centerX, centerY);
-                g.ScaleTransform(scale, scale);
+                g.RotateTransform(angle);
 
-                var darkScene = tone > 128;
-                var outlineTone = darkScene ? 235 : 48;
-                var lightTone = darkScene ? 218 : 118;
-                var midTone = darkScene ? 184 : 88;
-                var darkTone = darkScene ? 142 : 54;
+                var w = image.Width * scaleX;
+                var h = image.Height * scaleY;
+                var dest = Rectangle.Round(new RectangleF(-w / 2f, -h / 2f, w, h));
 
-                var stroke = swimming ? Math.Sin(seconds * 2.18) : Math.Sin(seconds * 0.95) * 0.12;
-                var topAngle = swimming ? (float)(-14 + stroke * 29) : -8f;
-                var bottomAngle = swimming ? (float)(14 - stroke * 29) : 8f;
-                var rearStroke = swimming ? (float)Math.Sin(seconds * 2.18 + 1.15) * 6f : 0f;
-
-                using var bodyBrush = new LinearGradientBrush(
-                    new PointF(0, -46),
-                    new PointF(0, 46),
-                    Color.FromArgb((int)(alpha * 0.92), lightTone, lightTone, lightTone),
-                    Color.FromArgb((int)(alpha * 0.94), darkTone, darkTone, darkTone));
-
-                using var bodyOutline = new Pen(
-                    Color.FromArgb((int)(alpha * 0.70), outlineTone, outlineTone, outlineTone),
-                    1.35f);
-
-                DrawRearFlipper(g, -45, -17, -11 + rearStroke, true, bodyBrush, bodyOutline);
-                DrawRearFlipper(g, -45, 17, 11 - rearStroke, false, bodyBrush, bodyOutline);
-
-                using var flipperDetail = new Pen(
-                    Color.FromArgb((int)(alpha * 0.22), outlineTone, outlineTone, outlineTone),
-                    0.78f);
-
-                DrawFrontFlipper(g, 22, -17, topAngle, true, bodyBrush, bodyOutline, flipperDetail);
-                DrawFrontFlipper(g, 22, 17, bottomAngle, false, bodyBrush, bodyOutline, flipperDetail);
-
-                using (var tail = new GraphicsPath())
-                {
-                    tail.AddPolygon([
-                        new PointF(-63, -5),
-                        new PointF(-81, 0),
-                        new PointF(-63, 6)
-                    ]);
-                    g.FillPath(bodyBrush, tail);
-                }
-
-                using (var neck = new GraphicsPath())
-                {
-                    neck.AddBezier(36, -9, 49, -11, 62, -10, 68, -5);
-                    neck.AddBezier(68, -5, 70, 3, 60, 10, 37, 9);
-                    neck.CloseFigure();
-                    g.FillPath(bodyBrush, neck);
-                }
-
-                using var shellPath = new GraphicsPath();
-                shellPath.AddBezier(-59, 0, -56, -35, -25, -44, 10, -40);
-                shellPath.AddBezier(10, -40, 43, -35, 56, -16, 54, 0);
-                shellPath.AddBezier(54, 0, 52, 24, 26, 40, -10, 40);
-                shellPath.AddBezier(-10, 40, -46, 37, -60, 14, -59, 0);
-                shellPath.CloseFigure();
-
-                using var shellBrush = new LinearGradientBrush(
-                    new PointF(-42, -34),
-                    new PointF(43, 35),
-                    Color.FromArgb((int)(alpha * 0.98), lightTone, lightTone, lightTone),
-                    Color.FromArgb((int)(alpha * 0.99), darkTone, darkTone, darkTone));
-
-                g.FillPath(shellBrush, shellPath);
-
-                using var shellRim = new Pen(
-                    Color.FromArgb((int)(alpha * 0.78), outlineTone, outlineTone, outlineTone),
-                    1.65f);
-                g.DrawPath(shellRim, shellPath);
-
-                var clipped = g.Save();
-                g.SetClip(shellPath, CombineMode.Intersect);
-                try
-                {
-                    var patches = new (float X, float Y, float W, float H, int A)[]
-                    {
-                        (-43, -17, 30, 19, 28),
-                        (-17, -29, 37, 22, 22),
-                        (13, -20, 32, 21, 31),
-                        (-34, 5, 36, 24, 26),
-                        (4, 5, 41, 25, 29),
-                        (-9, -7, 27, 19, 20)
-                    };
-
-                    foreach (var p in patches)
-                    {
-                        using var patch = new SolidBrush(
-                            Color.FromArgb((int)(alpha * p.A / 100.0), midTone, midTone, midTone));
-                        g.FillEllipse(patch, p.X, p.Y, p.W, p.H);
-                    }
-
-                    using var broadHighlight = new SolidBrush(
-                        Color.FromArgb((int)(alpha * 0.18), 245, 245, 245));
-                    g.FillEllipse(broadHighlight, -26, -30, 54, 24);
-
-                    using var softHighlight = new SolidBrush(
-                        Color.FromArgb((int)(alpha * 0.08), 250, 250, 250));
-                    g.FillEllipse(softHighlight, -44, -18, 78, 47);
-                }
-                finally
-                {
-                    g.Restore(clipped);
-                }
-
-                using (var head = new GraphicsPath())
-                {
-                    head.AddBezier(55, -14, 72, -17, 88, -9, 91, 0);
-                    head.AddBezier(91, 0, 87, 12, 72, 17, 55, 12);
-                    head.AddBezier(55, 12, 49, 4, 50, -6, 55, -14);
-                    head.CloseFigure();
-
-                    g.FillPath(bodyBrush, head);
-                    g.DrawPath(bodyOutline, head);
-                }
-
-                using var eyeWhite = new SolidBrush(Color.FromArgb((int)(alpha * 0.72), 245, 245, 245));
-                using var pupil = new SolidBrush(Color.FromArgb(alpha, 22, 22, 22));
-                g.FillEllipse(eyeWhite, 78f, -6.0f, 4.8f, 4.3f);
-                g.FillEllipse(pupil, 79.6f, -5.1f, 2.2f, 2.2f);
-
-                using var facePen = new Pen(
-                    Color.FromArgb((int)(alpha * 0.38), outlineTone, outlineTone, outlineTone),
-                    0.85f);
-                g.DrawArc(facePen, 76, 3, 10, 5, 12, 105);
-
-                using var rimHighlight = new Pen(
-                    Color.FromArgb((int)(alpha * 0.25), 248, 248, 248),
-                    1.15f);
-                g.DrawArc(rimHighlight, -49, -35, 91, 63, 198, 118);
+                using var attrs = AlphaAttributes(alpha);
+                g.DrawImage(image, dest, 0, 0, image.Width, image.Height, GraphicsUnit.Pixel, attrs);
             }
             finally
             {
@@ -890,132 +460,69 @@ internal static class TransferAnimationIntegration
             }
         }
 
-        private static void DrawFrontFlipper(
-            Graphics g,
-            float anchorX,
-            float anchorY,
-            float angle,
-            bool upper,
-            Brush brush,
-            Pen outline,
-            Pen detail)
+        private static void DrawImageCover(
+            Graphics g, Image image, Rectangle area,
+            float xOffset, float yOffset, float alpha)
         {
-            var saved = g.Save();
-            try
-            {
-                g.TranslateTransform(anchorX, anchorY);
-                g.RotateTransform(upper ? angle : -angle);
+            var scale = Math.Max(
+                (float)area.Width / image.Width,
+                (float)area.Height / image.Height);
 
-                using var path = new GraphicsPath();
-                if (upper)
-                {
-                    path.AddBezier(0, 0, 10, -14, 24, -31, 42, -40);
-                    path.AddBezier(42, -40, 49, -39, 43, -28, 31, -11);
-                    path.AddBezier(31, -11, 19, 2, 7, 8, 0, 0);
-                }
-                else
-                {
-                    path.AddBezier(0, 0, 10, 14, 24, 31, 42, 40);
-                    path.AddBezier(42, 40, 49, 39, 43, 28, 31, 11);
-                    path.AddBezier(31, 11, 19, -2, 7, -8, 0, 0);
-                }
-                path.CloseFigure();
+            var w = image.Width * scale;
+            var h = image.Height * scale;
+            var x = area.Left + (area.Width - w) / 2f + xOffset;
+            var y = area.Top + (area.Height - h) / 2f + yOffset;
+            var dest = Rectangle.Round(new RectangleF(x, y, w, h));
 
-                g.FillPath(brush, path);
-                g.DrawPath(outline, path);
-
-                using var crease = new GraphicsPath();
-                if (upper)
-                    crease.AddBezier(8, -2, 18, -12, 29, -26, 38, -33);
-                else
-                    crease.AddBezier(8, 2, 18, 12, 29, 26, 38, 33);
-                g.DrawPath(detail, crease);
-            }
-            finally
-            {
-                g.Restore(saved);
-            }
+            using var attrs = AlphaAttributes(alpha);
+            g.DrawImage(image, dest, 0, 0, image.Width, image.Height, GraphicsUnit.Pixel, attrs);
         }
 
-        private static void DrawRearFlipper(
-            Graphics g,
-            float anchorX,
-            float anchorY,
-            float angle,
-            bool upper,
-            Brush brush,
-            Pen outline)
+        private static ImageAttributes AlphaAttributes(float alpha)
         {
-            var saved = g.Save();
-            try
-            {
-                g.TranslateTransform(anchorX, anchorY);
-                g.RotateTransform(upper ? angle : -angle);
-
-                using var path = new GraphicsPath();
-                if (upper)
-                {
-                    path.AddBezier(0, 0, -9, -10, -24, -21, -35, -18);
-                    path.AddBezier(-35, -18, -43, -12, -28, -2, -7, 7);
-                    path.AddBezier(-7, 7, -2, 5, 0, 0, 0, 0);
-                }
-                else
-                {
-                    path.AddBezier(0, 0, -9, 10, -24, 21, -35, 18);
-                    path.AddBezier(-35, 18, -43, 12, -28, 2, -7, -7);
-                    path.AddBezier(-7, -7, -2, -5, 0, 0, 0, 0);
-                }
-                path.CloseFigure();
-
-                g.FillPath(brush, path);
-                g.DrawPath(outline, path);
-            }
-            finally
-            {
-                g.Restore(saved);
-            }
+            var attrs = new ImageAttributes();
+            var matrix = new ColorMatrix { Matrix33 = Math.Clamp(alpha, 0f, 1f) };
+            attrs.SetColorMatrix(matrix);
+            return attrs;
         }
 
         private void SeedScene()
         {
-            for (var i = 0; i < 56; i++)
-            {
-                _bubbles.Add(new BubbleSeed(
-                    _random.NextDouble(),
-                    _random.NextDouble(),
-                    0.050 + _random.NextDouble() * 0.12,
-                    2.5f + (float)_random.NextDouble() * 7.0f,
-                    3.0f + (float)_random.NextDouble() * 13.0f,
-                    _random.NextDouble() > 0.20));
-            }
+            for (var i = 0; i < 18; i++)
+                _backBubbles.Add(NewBubble(front: false));
 
-            for (var i = 0; i < 72; i++)
+            for (var i = 0; i < 13; i++)
+                _frontBubbles.Add(NewBubble(front: true));
+
+            for (var i = 0; i < 52; i++)
             {
                 _particles.Add(new ParticleSeed(
                     _random.NextDouble(),
                     _random.NextDouble(),
-                    0.018 + _random.NextDouble() * 0.045,
-                    1.0f + (float)_random.NextDouble() * 2.0f,
-                    1.0f + (float)_random.NextDouble() * 5.0f,
+                    0.018 + _random.NextDouble() * 0.040,
+                    1f + (float)_random.NextDouble() * 1.8f,
+                    1f + (float)_random.NextDouble() * 4f,
                     _random.NextDouble() > 0.68));
             }
-
-            for (var i = 0; i < 5; i++)
-            {
-                _fish.Add(new FishSeed(
-                    0.18f + (float)_random.NextDouble() * 0.34f,
-                    (float)_random.NextDouble(),
-                    0.012 + _random.NextDouble() * 0.018,
-                    12f + (float)_random.NextDouble() * 10f,
-                    _random.NextDouble() > 0.5));
-            }
         }
 
-        private static int ContrastTone(Color background)
+        private BubbleSeed NewBubble(bool front) => new(
+            _random.NextDouble(),
+            _random.NextDouble(),
+            0.050 + _random.NextDouble() * 0.11,
+            (front ? 3.5f : 2.2f) + (float)_random.NextDouble() * (front ? 5.5f : 4.2f),
+            3f + (float)_random.NextDouble() * 11f,
+            _random.NextDouble() > 0.22);
+
+        private static Color ContrastInk(Color background)
         {
             var brightness = background.R * 0.299 + background.G * 0.587 + background.B * 0.114;
-            return brightness < 135 ? 218 : 72;
+            return brightness < 135
+                ? Color.FromArgb(224, 224, 224)
+                : Color.FromArgb(70, 70, 70);
         }
+
+        private static float Lerp(float a, float b, float t) => a + (b - a) * t;
 
         private static AppSettings? GetSettings(MainForm form)
         {
@@ -1039,10 +546,7 @@ internal static class TransferAnimationIntegration
                     .GetProperty("DoubleBuffered", BindingFlags.Instance | BindingFlags.NonPublic)
                     ?.SetValue(grid, true);
             }
-            catch
-            {
-                // Animation still works without the optimization.
-            }
+            catch { }
         }
 
         private static IEnumerable<T> FindControls<T>(Control root) where T : Control
@@ -1050,7 +554,8 @@ internal static class TransferAnimationIntegration
             foreach (Control child in root.Controls)
             {
                 if (child is T match) yield return match;
-                foreach (var nested in FindControls<T>(child)) yield return nested;
+                foreach (var nested in FindControls<T>(child))
+                    yield return nested;
             }
         }
 
@@ -1068,14 +573,7 @@ internal static class TransferAnimationIntegration
             double Speed,
             float Size,
             float Drift,
-            bool Foreground);
-
-        private sealed record FishSeed(
-            float YRatio,
-            double Phase,
-            double Speed,
-            float Size,
-            bool RightToLeft);
+            bool Front);
 
         private enum AnimationState
         {
