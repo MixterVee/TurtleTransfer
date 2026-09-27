@@ -27,6 +27,9 @@ internal static class TransferAnimationIntegration
 
         private Bitmap? _background;
         private Bitmap? _turtle;
+        private Bitmap? _turtleBody;
+        private Bitmap? _turtleNearFlipper;
+        private Bitmap? _turtleFarFlipper;
         private Bitmap? _foreground;
 
         private DateTime _lastTickUtc = DateTime.UtcNow;
@@ -82,6 +85,9 @@ internal static class TransferAnimationIntegration
                 _grid.Paint -= GridOnPaint;
                 _background?.Dispose();
                 _turtle?.Dispose();
+                _turtleBody?.Dispose();
+                _turtleNearFlipper?.Dispose();
+                _turtleFarFlipper?.Dispose();
                 _foreground?.Dispose();
             };
         }
@@ -91,6 +97,94 @@ internal static class TransferAnimationIntegration
             _background = DecodeArtwork(TransferAnimationOceanBackground.Data);
             _turtle = DecodeArtwork(TransferAnimationTurtleSprite.Data);
             _foreground = null;
+
+            if (_turtle is not null)
+                BuildTurtleLayers(_turtle);
+        }
+
+        private void BuildTurtleLayers(Bitmap source)
+        {
+            _turtleBody?.Dispose();
+            _turtleNearFlipper?.Dispose();
+            _turtleFarFlipper?.Dispose();
+
+            _turtleBody = new Bitmap(source);
+
+            var nearExtract = ScalePolygon(source,
+            [
+                new PointF(173, 147), new PointF(197, 140), new PointF(218, 147),
+                new PointF(231, 164), new PointF(226, 184), new PointF(210, 205),
+                new PointF(190, 224), new PointF(164, 242), new PointF(137, 241),
+                new PointF(129, 231), new PointF(133, 219), new PointF(145, 198),
+                new PointF(154, 177)
+            ]);
+
+            var farExtract = ScalePolygon(source,
+            [
+                new PointF(274, 141), new PointF(293, 143), new PointF(311, 153),
+                new PointF(327, 171), new PointF(340, 191), new PointF(343, 207),
+                new PointF(335, 215), new PointF(322, 211), new PointF(307, 200),
+                new PointF(293, 186), new PointF(280, 170), new PointF(269, 155)
+            ]);
+
+            var nearErase = ScalePolygon(source,
+            [
+                new PointF(181, 153), new PointF(203, 148), new PointF(220, 157),
+                new PointF(227, 172), new PointF(220, 188), new PointF(204, 207),
+                new PointF(185, 226), new PointF(160, 241), new PointF(138, 239),
+                new PointF(131, 230), new PointF(137, 216), new PointF(149, 197),
+                new PointF(159, 176)
+            ]);
+
+            var farErase = ScalePolygon(source,
+            [
+                new PointF(281, 148), new PointF(296, 147), new PointF(312, 157),
+                new PointF(327, 175), new PointF(339, 192), new PointF(341, 207),
+                new PointF(334, 213), new PointF(322, 209), new PointF(308, 199),
+                new PointF(295, 187), new PointF(283, 172), new PointF(274, 157)
+            ]);
+
+            _turtleNearFlipper = ExtractPolygonLayer(source, nearExtract);
+            _turtleFarFlipper = ExtractPolygonLayer(source, farExtract);
+
+            ClearPolygon(_turtleBody, nearErase);
+            ClearPolygon(_turtleBody, farErase);
+        }
+
+        private static PointF[] ScalePolygon(Bitmap source, PointF[] points)
+        {
+            const float designWidth = 360f;
+            const float designHeight = 270f;
+            var sx = source.Width / designWidth;
+            var sy = source.Height / designHeight;
+
+            return points
+                .Select(p => new PointF(p.X * sx, p.Y * sy))
+                .ToArray();
+        }
+
+        private static Bitmap ExtractPolygonLayer(Bitmap source, PointF[] polygon)
+        {
+            var layer = new Bitmap(source.Width, source.Height, PixelFormat.Format32bppArgb);
+            using var g = Graphics.FromImage(layer);
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            using var path = new GraphicsPath();
+            path.AddPolygon(polygon);
+            g.SetClip(path);
+            g.DrawImageUnscaled(source, 0, 0);
+            return layer;
+        }
+
+        private static void ClearPolygon(Bitmap target, PointF[] polygon)
+        {
+            using var g = Graphics.FromImage(target);
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            g.CompositingMode = CompositingMode.SourceCopy;
+
+            using var path = new GraphicsPath();
+            path.AddPolygon(polygon);
+            using var transparent = new SolidBrush(Color.Transparent);
+            g.FillPath(transparent, path);
         }
 
         private static Bitmap? DecodeArtwork(string base64)
@@ -259,8 +353,8 @@ internal static class TransferAnimationIntegration
             {
                 case AnimationState.Transferring:
                     x = Lerp(area.Left - halfWidth - 25, area.Right + halfWidth + 25, (float)_travel);
-                    y = centerY + (float)Math.Sin(seconds * 0.95) * 8f;
-                    angle = (float)Math.Sin(seconds * 1.30) * 1.7f;
+                    y = centerY + (float)Math.Sin(seconds * 0.95) * 7f;
+                    angle = (float)Math.Sin(seconds * 1.18) * 1.25f;
                     alpha = 1.0f;
                     break;
 
@@ -269,15 +363,15 @@ internal static class TransferAnimationIntegration
                         Lerp(area.Left + halfWidth, area.Right - halfWidth, (float)Math.Clamp(_travel, 0, 1)),
                         area.Left + halfWidth,
                         area.Right - halfWidth);
-                    y = centerY + (float)Math.Sin(seconds * 1.25) * 4f;
-                    angle = (float)Math.Sin(seconds * 0.80) * 0.8f;
+                    y = centerY + (float)Math.Sin(seconds * 1.10) * 3f;
+                    angle = (float)Math.Sin(seconds * 0.70) * 0.55f;
                     alpha = 0.94f;
                     break;
 
                 case AnimationState.Completing:
                     x = area.Left + area.Width * 0.60f;
-                    y = centerY + (float)Math.Sin(seconds * 0.95) * 5f;
-                    angle = (float)Math.Sin(seconds * 1.10) * 1.3f;
+                    y = centerY + (float)Math.Sin(seconds * 0.95) * 4f;
+                    angle = (float)Math.Sin(seconds * 1.00) * 0.95f;
                     alpha = 1.0f;
                     break;
 
@@ -293,12 +387,140 @@ internal static class TransferAnimationIntegration
                     return;
             }
 
-            // A tiny breathing/paddling illusion keeps the photographic sprite from feeling static.
-            var swimPulse = state == AnimationState.Transferring
-                ? 1f + (float)Math.Sin(seconds * 2.25) * 0.012f
-                : 1f;
+            var stroke = (float)Math.Sin(seconds * 2.15);
+            var activeStroke = state is AnimationState.Transferring or AnimationState.Completing;
+            var nearFlipperAngle = activeStroke ? stroke * 6.5f :
+                state == AnimationState.Paused ? stroke * 1.4f : 0f;
+            var farFlipperAngle = activeStroke ? -stroke * 5.2f :
+                state == AnimationState.Paused ? -stroke * 1.0f : 0f;
 
-            DrawCenteredImage(g, _turtle, x, y, scale, scale * swimPulse, angle, alpha);
+            if (activeStroke)
+            {
+                // A tiny pitch and surge on the power stroke makes the motion read as propulsion
+                // rather than a sprite simply sliding across the screen.
+                angle += stroke * 0.28f;
+                y += stroke * 1.1f;
+                x += Math.Max(0f, -stroke) * 2.6f;
+            }
+
+            if (_turtleBody is null || _turtleNearFlipper is null || _turtleFarFlipper is null)
+            {
+                DrawCenteredImage(g, _turtle, x, y, scale, scale, angle, alpha);
+                return;
+            }
+
+            DrawLayeredTurtle(
+                g,
+                x,
+                y,
+                scale,
+                angle,
+                alpha,
+                nearFlipperAngle,
+                farFlipperAngle);
+        }
+
+        private void DrawLayeredTurtle(
+            Graphics g,
+            float centerX,
+            float centerY,
+            float scale,
+            float bodyAngle,
+            float alpha,
+            float nearFlipperAngle,
+            float farFlipperAngle)
+        {
+            if (_turtleBody is null || _turtleNearFlipper is null || _turtleFarFlipper is null)
+                return;
+
+            var saved = g.Save();
+            try
+            {
+                g.TranslateTransform(centerX, centerY);
+                g.RotateTransform(bodyAngle);
+                g.ScaleTransform(scale, scale);
+
+                var w = _turtleBody.Width;
+                var h = _turtleBody.Height;
+                var originX = -w / 2f;
+                var originY = -h / 2f;
+
+                const float designWidth = 360f;
+                const float designHeight = 270f;
+                var sx = w / designWidth;
+                var sy = h / designHeight;
+
+                var farPivot = new PointF(282f * sx - w / 2f, 151f * sy - h / 2f);
+                var nearPivot = new PointF(193f * sx - w / 2f, 151f * sy - h / 2f);
+
+                DrawLayerAroundPivot(
+                    g,
+                    _turtleFarFlipper,
+                    originX,
+                    originY,
+                    farPivot,
+                    farFlipperAngle,
+                    alpha);
+
+                using (var attrs = AlphaAttributes(alpha))
+                {
+                    g.DrawImage(
+                        _turtleBody,
+                        Rectangle.Round(new RectangleF(originX, originY, w, h)),
+                        0,
+                        0,
+                        w,
+                        h,
+                        GraphicsUnit.Pixel,
+                        attrs);
+                }
+
+                DrawLayerAroundPivot(
+                    g,
+                    _turtleNearFlipper,
+                    originX,
+                    originY,
+                    nearPivot,
+                    nearFlipperAngle,
+                    alpha);
+            }
+            finally
+            {
+                g.Restore(saved);
+            }
+        }
+
+        private static void DrawLayerAroundPivot(
+            Graphics g,
+            Image layer,
+            float originX,
+            float originY,
+            PointF pivot,
+            float angle,
+            float alpha)
+        {
+            var saved = g.Save();
+            try
+            {
+                g.TranslateTransform(pivot.X, pivot.Y);
+                g.RotateTransform(angle);
+                g.TranslateTransform(-pivot.X, -pivot.Y);
+
+                using var attrs = AlphaAttributes(alpha);
+                g.DrawImage(
+                    layer,
+                    Rectangle.Round(new RectangleF(originX, originY, layer.Width, layer.Height)),
+                    0,
+                    0,
+                    layer.Width,
+                    layer.Height,
+                    GraphicsUnit.Pixel,
+                    attrs);
+            }
+            finally
+            {
+                g.Restore(saved);
+            }
         }
 
         private static void DrawFallbackWater(Graphics g, Rectangle area, Color ink)
