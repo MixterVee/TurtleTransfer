@@ -369,7 +369,7 @@ internal static class TransferAnimationIntegration
 
                 // Eye.
                 using var eye = new SolidBrush(Color.FromArgb(Math.Min(150, alpha + 30), tone, tone, tone));
-                g.FillEllipse(69, -6, 2.8f, 2.8f);
+                g.FillEllipse(eye, 69, -6, 2.8f, 2.8f);
             }
             finally
             {
