@@ -34,6 +34,10 @@ internal static class TransferAnimationIntegration
         private Bitmap? _turtleBody;
         private Bitmap? _turtleNearFlipper;
         private Bitmap? _turtleFarFlipper;
+        private Bitmap? _turtleBodyFrame;
+        private Bitmap? _turtleNearFlipperFrame;
+        private Bitmap? _turtleFarFlipperFrame;
+        private int _turtleFrameTargetHeight;
         private Bitmap? _foreground;
 
         private DateTime _lastTickUtc = DateTime.UtcNow;
@@ -114,6 +118,7 @@ internal static class TransferAnimationIntegration
                 _turtleBody?.Dispose();
                 _turtleNearFlipper?.Dispose();
                 _turtleFarFlipper?.Dispose();
+                ResetTurtleRenderCache();
                 _foreground?.Dispose();
             };
         }
@@ -153,19 +158,27 @@ internal static class TransferAnimationIntegration
             g.CompositingQuality = CompositingQuality.HighQuality;
             g.PixelOffsetMode = PixelOffsetMode.HighQuality;
 
+            var frameArea = new Rectangle(0, 0, size.Width, size.Height);
             DrawImageCover(
                 g,
                 _background,
-                new Rectangle(0, 0, size.Width, size.Height),
+                frameArea,
                 0,
                 0,
                 0.78f);
+
+            // These scene effects do not need to be recalculated every frame.
+            // Baking them into the cached background removes several large per-frame fills.
+            var ink = ContrastInk(_grid.BackgroundColor);
+            DrawLightRays(g, frameArea, ink, 0);
+            DrawVignette(g, frameArea, ink);
 
             _backgroundFrameSize = size;
         }
 
         private void BuildTurtleLayers(Bitmap source)
         {
+            ResetTurtleRenderCache();
             _turtleBody?.Dispose();
             _turtleNearFlipper?.Dispose();
             _turtleFarFlipper?.Dispose();
@@ -211,6 +224,54 @@ internal static class TransferAnimationIntegration
 
             ClearPolygon(_turtleBody, nearErase);
             ClearPolygon(_turtleBody, farErase);
+        }
+
+
+        private void ResetTurtleRenderCache()
+        {
+            _turtleBodyFrame?.Dispose();
+            _turtleNearFlipperFrame?.Dispose();
+            _turtleFarFlipperFrame?.Dispose();
+            _turtleBodyFrame = null;
+            _turtleNearFlipperFrame = null;
+            _turtleFarFlipperFrame = null;
+            _turtleFrameTargetHeight = 0;
+        }
+
+        private bool EnsureTurtleRenderCache(int targetHeight)
+        {
+            if (_turtleBody is null || _turtleNearFlipper is null || _turtleFarFlipper is null)
+                return false;
+
+            targetHeight = Math.Max(1, targetHeight);
+            if (_turtleBodyFrame is not null &&
+                _turtleNearFlipperFrame is not null &&
+                _turtleFarFlipperFrame is not null &&
+                _turtleFrameTargetHeight == targetHeight)
+                return true;
+
+            ResetTurtleRenderCache();
+
+            var scale = targetHeight / (float)_turtleBody.Height;
+            var targetWidth = Math.Max(1, (int)Math.Round(_turtleBody.Width * scale));
+
+            _turtleBodyFrame = ScaleLayer(_turtleBody, targetWidth, targetHeight);
+            _turtleNearFlipperFrame = ScaleLayer(_turtleNearFlipper, targetWidth, targetHeight);
+            _turtleFarFlipperFrame = ScaleLayer(_turtleFarFlipper, targetWidth, targetHeight);
+            _turtleFrameTargetHeight = targetHeight;
+            return true;
+        }
+
+        private static Bitmap ScaleLayer(Bitmap source, int width, int height)
+        {
+            var result = new Bitmap(width, height, PixelFormat.Format32bppPArgb);
+            using var g = Graphics.FromImage(result);
+            g.CompositingMode = CompositingMode.SourceCopy;
+            g.CompositingQuality = CompositingQuality.HighQuality;
+            g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+            g.PixelOffsetMode = PixelOffsetMode.HighQuality;
+            g.DrawImage(source, new Rectangle(0, 0, width, height));
+            return result;
         }
 
         private static PointF[] ScalePolygon(Bitmap source, PointF[] points)
@@ -373,9 +434,9 @@ internal static class TransferAnimationIntegration
                 return;
 
             g.SmoothingMode = SmoothingMode.AntiAlias;
-            g.PixelOffsetMode = PixelOffsetMode.HighQuality;
+            g.PixelOffsetMode = PixelOffsetMode.HighSpeed;
             g.CompositingQuality = CompositingQuality.HighSpeed;
-            g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+            g.InterpolationMode = InterpolationMode.Bilinear;
 
             var seconds = Environment.TickCount64 / 1000.0;
             var ink = ContrastInk(_grid.BackgroundColor);
@@ -393,7 +454,6 @@ internal static class TransferAnimationIntegration
                 DrawFallbackWater(g, area, ink);
             }
 
-            DrawLightRays(g, area, ink, seconds);
             DrawParticles(g, area, ink, seconds, state, front: false);
             DrawCritters(g, area, ink, seconds, state);
             DrawBubbles(g, area, ink, seconds, state, _backBubbles);
@@ -413,7 +473,6 @@ internal static class TransferAnimationIntegration
                 DrawCompletionBurst(g, area, ink, seconds, (int)(110 * remaining));
             }
 
-            DrawVignette(g, area, ink);
         }
 
         private void DrawTurtle(Graphics g, Rectangle area, double seconds, AnimationState state)
@@ -422,8 +481,10 @@ internal static class TransferAnimationIntegration
                 return;
 
             var targetHeight = Math.Clamp(area.Height * 0.56f, 145f, 315f);
-            var scale = targetHeight / _turtle.Height;
-            var halfWidth = _turtle.Width * scale / 2f;
+            var cached = EnsureTurtleRenderCache((int)Math.Round(targetHeight));
+            var renderBody = cached ? _turtleBodyFrame : _turtleBody;
+            var scale = cached ? 1f : targetHeight / _turtle.Height;
+            var halfWidth = (renderBody?.Width ?? _turtle.Width) * scale / 2f;
             var centerY = area.Top + area.Height * 0.43f;
 
             float x;
@@ -485,7 +546,9 @@ internal static class TransferAnimationIntegration
                 x += Math.Max(0f, -stroke) * 3.8f;
             }
 
-            if (_turtleBody is null || _turtleNearFlipper is null || _turtleFarFlipper is null)
+            if ((_turtleBodyFrame ?? _turtleBody) is null ||
+                (_turtleNearFlipperFrame ?? _turtleNearFlipper) is null ||
+                (_turtleFarFlipperFrame ?? _turtleFarFlipper) is null)
             {
                 DrawCenteredImage(g, _turtle, x, y, scale, scale, angle, alpha);
                 return;
@@ -512,7 +575,11 @@ internal static class TransferAnimationIntegration
             float nearFlipperAngle,
             float farFlipperAngle)
         {
-            if (_turtleBody is null || _turtleNearFlipper is null || _turtleFarFlipper is null)
+            var body = _turtleBodyFrame ?? _turtleBody;
+            var nearFlipper = _turtleNearFlipperFrame ?? _turtleNearFlipper;
+            var farFlipper = _turtleFarFlipperFrame ?? _turtleFarFlipper;
+
+            if (body is null || nearFlipper is null || farFlipper is null)
                 return;
 
             var saved = g.Save();
@@ -520,10 +587,11 @@ internal static class TransferAnimationIntegration
             {
                 g.TranslateTransform(centerX, centerY);
                 g.RotateTransform(bodyAngle);
-                g.ScaleTransform(scale, scale);
+                if (Math.Abs(scale - 1f) > 0.001f)
+                    g.ScaleTransform(scale, scale);
 
-                var w = _turtleBody.Width;
-                var h = _turtleBody.Height;
+                var w = body.Width;
+                var h = body.Height;
                 var originX = -w / 2f;
                 var originY = -h / 2f;
 
@@ -537,18 +605,18 @@ internal static class TransferAnimationIntegration
 
                 DrawLayerAroundPivot(
                     g,
-                    _turtleFarFlipper,
+                    farFlipper,
                     originX,
                     originY,
                     farPivot,
                     farFlipperAngle,
                     alpha);
 
-                DrawImageLayer(g, _turtleBody, originX, originY, alpha);
+                DrawImageLayer(g, body, originX, originY, alpha);
 
                 DrawLayerAroundPivot(
                     g,
-                    _turtleNearFlipper,
+                    nearFlipper,
                     originX,
                     originY,
                     nearPivot,
@@ -730,10 +798,10 @@ internal static class TransferAnimationIntegration
         {
             var alpha = state switch
             {
-                AnimationState.Transferring => 58,
-                AnimationState.Completing => 58,
-                AnimationState.Paused => 38,
-                AnimationState.Waiting => 28,
+                AnimationState.Transferring => 92,
+                AnimationState.Completing => 92,
+                AnimationState.Paused => 72,
+                AnimationState.Waiting => 52,
                 _ => 0
             };
 
@@ -940,9 +1008,9 @@ internal static class TransferAnimationIntegration
                     _random.NextDouble() > 0.72));
             }
 
-            _critters.Add(new CritterSeed(CritterKind.Fish, 0.25f, 0.16, 0.024, 28f, false));
-            _critters.Add(new CritterSeed(CritterKind.Fish, 0.36f, 0.56, 0.020, 23f, true));
-            _critters.Add(new CritterSeed(CritterKind.Ray, 0.54f, 0.74, 0.015, 34f, true));
+            _critters.Add(new CritterSeed(CritterKind.Fish, 0.24f, 0.16, 0.036, 38f, false));
+            _critters.Add(new CritterSeed(CritterKind.Fish, 0.37f, 0.56, 0.031, 31f, true));
+            _critters.Add(new CritterSeed(CritterKind.Ray, 0.56f, 0.74, 0.026, 46f, true));
         }
 
         private BubbleSeed NewBubble(bool front)
