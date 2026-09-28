@@ -24,6 +24,7 @@ internal static class TransferAnimationIntegration
         private readonly List<BubbleSeed> _backBubbles = [];
         private readonly List<BubbleSeed> _frontBubbles = [];
         private readonly List<ParticleSeed> _particles = [];
+        private readonly List<CritterSeed> _critters = [];
 
         private Bitmap? _background;
         private Bitmap? _backgroundFrame;
@@ -356,6 +357,7 @@ internal static class TransferAnimationIntegration
 
                 DrawLightRays(g, area, ink, seconds);
                 DrawParticles(g, area, ink, seconds, state, front: false);
+                DrawCritters(g, area, ink, seconds, state);
                 DrawBubbles(g, area, ink, seconds, state, _backBubbles);
 
                 DrawTurtle(g, area, seconds, state);
@@ -644,7 +646,12 @@ internal static class TransferAnimationIntegration
                 _ => 0
             };
 
+            if (alpha <= 0)
+                return;
+
             var speedScale = state == AnimationState.Paused ? 0.35 : 1.0;
+            using var pen = new Pen(Color.FromArgb(alpha, ink), 1.1f);
+            using var highlight = new Pen(Color.FromArgb(Math.Min(120, alpha + 25), Color.White), 0.9f);
 
             foreach (var b in bubbles)
             {
@@ -655,12 +662,11 @@ internal static class TransferAnimationIntegration
                     + (float)Math.Sin(seconds * 0.58 + b.Phase * 7) * b.Drift;
                 var y = area.Bottom - 10 - (float)(cycle * Math.Max(24, area.Height - 18));
 
-                using var pen = new Pen(Color.FromArgb(alpha, ink), Math.Max(1f, b.Radius * 0.13f));
+                pen.Width = Math.Max(1f, b.Radius * 0.12f);
                 g.DrawEllipse(pen, x - b.Radius, y - b.Radius, b.Radius * 2, b.Radius * 2);
 
                 if (b.Highlight && b.Radius > 3f)
                 {
-                    using var highlight = new Pen(Color.FromArgb(Math.Min(120, alpha + 25), Color.White), 0.9f);
                     g.DrawArc(highlight,
                         x - b.Radius * 0.55f,
                         y - b.Radius * 0.58f,
@@ -668,6 +674,120 @@ internal static class TransferAnimationIntegration
                         b.Radius * 0.9f,
                         190, 100);
                 }
+            }
+        }
+
+        private void DrawCritters(
+            Graphics g,
+            Rectangle area,
+            Color ink,
+            double seconds,
+            AnimationState state)
+        {
+            var alpha = state switch
+            {
+                AnimationState.Transferring => 24,
+                AnimationState.Completing => 24,
+                AnimationState.Paused => 16,
+                AnimationState.Waiting => 10,
+                _ => 0
+            };
+
+            if (alpha <= 0)
+                return;
+
+            using var brush = new SolidBrush(Color.FromArgb(alpha, ink));
+
+            foreach (var c in _critters)
+            {
+                var t = (seconds * c.Speed + c.Phase) % 1.0;
+                if (t < 0) t += 1.0;
+
+                var x = c.RightToLeft
+                    ? area.Right + c.Size - (float)t * (area.Width + c.Size * 2f)
+                    : area.Left - c.Size + (float)t * (area.Width + c.Size * 2f);
+
+                var y = area.Top + area.Height * c.YRatio
+                    + (float)Math.Sin(seconds * 0.45 + c.Phase * 6.0) * 3f;
+
+                if (c.Kind == CritterKind.Ray)
+                    DrawRay(g, brush, x, y, c.Size, c.RightToLeft);
+                else
+                    DrawFish(g, brush, x, y, c.Size, c.RightToLeft);
+            }
+        }
+
+        private static void DrawFish(
+            Graphics g,
+            Brush brush,
+            float x,
+            float y,
+            float size,
+            bool rightToLeft)
+        {
+            var saved = g.Save();
+            try
+            {
+                g.TranslateTransform(x, y);
+                if (rightToLeft)
+                    g.ScaleTransform(-1, 1);
+
+                g.FillEllipse(
+                    brush,
+                    -size * 0.34f,
+                    -size * 0.16f,
+                    size * 0.62f,
+                    size * 0.32f);
+
+                using var tail = new GraphicsPath();
+                tail.AddPolygon([
+                    new PointF(-size * 0.29f, 0),
+                    new PointF(-size * 0.58f, -size * 0.22f),
+                    new PointF(-size * 0.58f, size * 0.22f)
+                ]);
+                g.FillPath(brush, tail);
+            }
+            finally
+            {
+                g.Restore(saved);
+            }
+        }
+
+        private static void DrawRay(
+            Graphics g,
+            Brush brush,
+            float x,
+            float y,
+            float size,
+            bool rightToLeft)
+        {
+            var saved = g.Save();
+            try
+            {
+                g.TranslateTransform(x, y);
+                if (rightToLeft)
+                    g.ScaleTransform(-1, 1);
+
+                using var body = new GraphicsPath();
+                body.AddBezier(
+                    -size * 0.42f, 0,
+                    -size * 0.15f, -size * 0.26f,
+                    size * 0.16f, -size * 0.26f,
+                    size * 0.42f, 0);
+                body.AddBezier(
+                    size * 0.42f, 0,
+                    size * 0.14f, size * 0.20f,
+                    -size * 0.16f, size * 0.20f,
+                    -size * 0.42f, 0);
+                body.CloseFigure();
+                g.FillPath(brush, body);
+
+                using var tail = new Pen(((SolidBrush)brush).Color, Math.Max(1f, size * 0.035f));
+                g.DrawLine(tail, size * 0.40f, 0, size * 0.82f, size * 0.02f);
+            }
+            finally
+            {
+                g.Restore(saved);
             }
         }
 
@@ -757,24 +877,28 @@ internal static class TransferAnimationIntegration
 
         private void SeedScene()
         {
-            // More depth variation: lots of tiny distant bubbles, a mixed middle range,
-            // and only a few large foreground bubbles.
-            for (var i = 0; i < 22; i++)
+            // Keep the animated workload intentionally small for smooth 60 fps playback:
+            // fewer bubbles, but each is more visually distinct.
+            for (var i = 0; i < 10; i++)
                 _backBubbles.Add(NewBubble(front: false));
 
-            for (var i = 0; i < 16; i++)
+            for (var i = 0; i < 7; i++)
                 _frontBubbles.Add(NewBubble(front: true));
 
-            for (var i = 0; i < 52; i++)
+            for (var i = 0; i < 28; i++)
             {
                 _particles.Add(new ParticleSeed(
                     _random.NextDouble(),
                     _random.NextDouble(),
-                    0.018 + _random.NextDouble() * 0.040,
-                    1f + (float)_random.NextDouble() * 1.8f,
-                    1f + (float)_random.NextDouble() * 4f,
-                    _random.NextDouble() > 0.68));
+                    0.018 + _random.NextDouble() * 0.032,
+                    1f + (float)_random.NextDouble() * 1.6f,
+                    1f + (float)_random.NextDouble() * 3.2f,
+                    _random.NextDouble() > 0.72));
             }
+
+            _critters.Add(new CritterSeed(CritterKind.Fish, 0.25f, 0.07, 0.012, 18f, false));
+            _critters.Add(new CritterSeed(CritterKind.Fish, 0.34f, 0.48, 0.009, 14f, true));
+            _critters.Add(new CritterSeed(CritterKind.Ray, 0.52f, 0.77, 0.0065, 23f, true));
         }
 
         private BubbleSeed NewBubble(bool front)
@@ -786,36 +910,33 @@ internal static class TransferAnimationIntegration
             {
                 radius = roll switch
                 {
-                    < 0.68 => 1.1f + (float)_random.NextDouble() * 2.0f,
-                    < 0.93 => 3.0f + (float)_random.NextDouble() * 2.2f,
-                    _ => 5.2f + (float)_random.NextDouble() * 2.0f
+                    < 0.55 => 2.4f + (float)_random.NextDouble() * 2.2f,
+                    < 0.88 => 4.8f + (float)_random.NextDouble() * 2.8f,
+                    _ => 7.6f + (float)_random.NextDouble() * 2.8f
                 };
             }
             else
             {
                 radius = roll switch
                 {
-                    < 0.42 => 2.4f + (float)_random.NextDouble() * 2.8f,
-                    < 0.82 => 5.0f + (float)_random.NextDouble() * 3.5f,
-                    _ => 8.5f + (float)_random.NextDouble() * 5.5f
+                    < 0.30 => 4.8f + (float)_random.NextDouble() * 2.8f,
+                    < 0.78 => 7.8f + (float)_random.NextDouble() * 4.2f,
+                    _ => 12.5f + (float)_random.NextDouble() * 5.5f
                 };
             }
 
-            // Larger bubbles rise a little faster, which reads more naturally.
-            var speed = 0.032 + radius * 0.0105 + _random.NextDouble() * 0.028;
+            var speed = 0.028 + radius * 0.0092 + _random.NextDouble() * 0.018;
 
-            // Give a few bubbles mild clustering around three loose columns so the field
-            // doesn't look perfectly uniform.
             var x = _random.NextDouble();
-            if (_random.NextDouble() < 0.35)
+            if (_random.NextDouble() < 0.28)
             {
                 var cluster = _random.Next(3) switch
                 {
-                    0 => 0.22,
-                    1 => 0.52,
-                    _ => 0.78
+                    0 => 0.20,
+                    1 => 0.53,
+                    _ => 0.80
                 };
-                x = Math.Clamp(cluster + (_random.NextDouble() - 0.5) * 0.16, 0.03, 0.97);
+                x = Math.Clamp(cluster + (_random.NextDouble() - 0.5) * 0.14, 0.04, 0.96);
             }
 
             return new BubbleSeed(
@@ -823,8 +944,8 @@ internal static class TransferAnimationIntegration
                 _random.NextDouble(),
                 speed,
                 radius,
-                2f + (float)_random.NextDouble() * (front ? 12f : 7f),
-                _random.NextDouble() > 0.18);
+                2f + (float)_random.NextDouble() * (front ? 9f : 5f),
+                _random.NextDouble() > 0.12);
         }
 
         private static Color ContrastInk(Color background)
@@ -887,6 +1008,20 @@ internal static class TransferAnimationIntegration
             float Size,
             float Drift,
             bool Front);
+
+        private sealed record CritterSeed(
+            CritterKind Kind,
+            float YRatio,
+            double Phase,
+            double Speed,
+            float Size,
+            bool RightToLeft);
+
+        private enum CritterKind
+        {
+            Fish,
+            Ray
+        }
 
         private enum AnimationState
         {
