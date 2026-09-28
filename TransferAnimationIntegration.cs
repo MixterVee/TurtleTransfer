@@ -20,6 +20,7 @@ internal static class TransferAnimationIntegration
         private readonly AppSettings _settings;
         private readonly CheckBox _toggle;
         private readonly System.Windows.Forms.Timer _timer;
+        private readonly AnimationSurface _surface;
         private readonly Random _random = new(45827);
         private readonly List<BubbleSeed> _backBubbles = [];
         private readonly List<BubbleSeed> _frontBubbles = [];
@@ -69,15 +70,35 @@ internal static class TransferAnimationIntegration
             {
                 _settings.TransferAnimationEnabled = _toggle.Checked;
                 try { _settings.Save(); } catch { }
-                _grid.Invalidate();
+                UpdateSurfaceBounds();
+                _surface.Invalidate();
             };
 
             EnableDoubleBuffering(_grid);
             SeedScene();
             LoadArtwork();
 
-            _grid.Paint += GridOnPaint;
-            _grid.Resize += (_, _) => ResetBackgroundFrame();
+            _surface = new AnimationSurface(this)
+            {
+                Visible = false,
+                BackColor = _grid.BackgroundColor
+            };
+            _grid.Controls.Add(_surface);
+            _surface.BringToFront();
+
+            _grid.Resize += (_, _) =>
+            {
+                ResetBackgroundFrame();
+                UpdateSurfaceBounds();
+            };
+            _grid.Scroll += (_, _) => UpdateSurfaceBounds();
+            _grid.RowsAdded += (_, _) => UpdateSurfaceBounds();
+            _grid.RowsRemoved += (_, _) => UpdateSurfaceBounds();
+            _grid.RowHeightChanged += (_, _) => UpdateSurfaceBounds();
+            _grid.ColumnHeadersHeightChanged += (_, _) => UpdateSurfaceBounds();
+
+            UpdateSurfaceBounds();
+
             _timer = new System.Windows.Forms.Timer { Interval = 16 };
             _timer.Tick += OnTick;
             _timer.Start();
@@ -86,7 +107,7 @@ internal static class TransferAnimationIntegration
             {
                 _timer.Stop();
                 _timer.Dispose();
-                _grid.Paint -= GridOnPaint;
+                _surface.Dispose();
                 _background?.Dispose();
                 _backgroundFrame?.Dispose();
                 _turtle?.Dispose();
@@ -267,9 +288,9 @@ internal static class TransferAnimationIntegration
                     _travel = -0.18;
             }
 
-            var area = GetAnimationArea();
-            if (area.Width > 0 && area.Height > 0)
-                _grid.Invalidate(area);
+            UpdateSurfaceBounds(state);
+            if (_surface.Visible)
+                _surface.Invalidate();
         }
 
         private AnimationState GetState(DateTime now)
@@ -314,13 +335,36 @@ internal static class TransferAnimationIntegration
                 Math.Max(0, _grid.ClientSize.Height - top - 1));
         }
 
-        private void GridOnPaint(object? sender, PaintEventArgs e)
+        private void UpdateSurfaceBounds(AnimationState? knownState = null)
         {
-            if (!_toggle.Checked)
-                return;
-
             var area = GetAnimationArea();
-            if (area.Width < 260 || area.Height < 130)
+            var state = knownState ?? GetState(DateTime.UtcNow);
+
+            var shouldShow =
+                _toggle.Checked &&
+                state != AnimationState.Idle &&
+                area.Width >= 260 &&
+                area.Height >= 130;
+
+            if (!shouldShow)
+            {
+                _surface.Visible = false;
+                return;
+            }
+
+            if (_surface.Bounds != area)
+            {
+                _surface.Bounds = area;
+                ResetBackgroundFrame();
+            }
+
+            _surface.Visible = true;
+            _surface.BringToFront();
+        }
+
+        private void PaintScene(Graphics g, Rectangle area)
+        {
+            if (!_toggle.Checked || area.Width < 260 || area.Height < 130)
                 return;
 
             var now = DateTime.UtcNow;
@@ -328,59 +372,48 @@ internal static class TransferAnimationIntegration
             if (state == AnimationState.Idle)
                 return;
 
-            var g = e.Graphics;
-            var saved = g.Save();
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            g.PixelOffsetMode = PixelOffsetMode.HighQuality;
+            g.CompositingQuality = CompositingQuality.HighSpeed;
+            g.InterpolationMode = InterpolationMode.HighQualityBicubic;
 
-            try
+            var seconds = Environment.TickCount64 / 1000.0;
+            var ink = ContrastInk(_grid.BackgroundColor);
+
+            if (_background is not null)
             {
-                g.SetClip(area);
-                g.SmoothingMode = SmoothingMode.AntiAlias;
-                g.PixelOffsetMode = PixelOffsetMode.HighQuality;
-                g.CompositingQuality = CompositingQuality.HighQuality;
-                g.InterpolationMode = InterpolationMode.HighQualityBicubic;
-
-                var seconds = Environment.TickCount64 / 1000.0;
-                var ink = ContrastInk(_grid.BackgroundColor);
-
-                if (_background is not null)
-                {
-                    EnsureBackgroundFrame(area.Size);
-                    if (_backgroundFrame is not null)
-                        g.DrawImageUnscaled(_backgroundFrame, area.Left, area.Top);
-                    else
-                        DrawFallbackWater(g, area, ink);
-                }
+                EnsureBackgroundFrame(area.Size);
+                if (_backgroundFrame is not null)
+                    g.DrawImageUnscaled(_backgroundFrame, 0, 0);
                 else
-                {
                     DrawFallbackWater(g, area, ink);
-                }
-
-                DrawLightRays(g, area, ink, seconds);
-                DrawParticles(g, area, ink, seconds, state, front: false);
-                DrawCritters(g, area, ink, seconds, state);
-                DrawBubbles(g, area, ink, seconds, state, _backBubbles);
-
-                DrawTurtle(g, area, seconds, state);
-
-                DrawBubbles(g, area, ink, seconds, state, _frontBubbles);
-                DrawParticles(g, area, ink, seconds, state, front: true);
-
-                if (_foreground is not null)
-                    DrawImageCover(g, _foreground, area,
-                        (float)Math.Sin(seconds * 0.15 + 1.1) * -4f, 0, 0.88f);
-
-                if (state == AnimationState.Completing)
-                {
-                    var remaining = Math.Clamp((_completionUntilUtc - now).TotalSeconds / 3.0, 0, 1);
-                    DrawCompletionBurst(g, area, ink, seconds, (int)(110 * remaining));
-                }
-
-                DrawVignette(g, area, ink);
             }
-            finally
+            else
             {
-                g.Restore(saved);
+                DrawFallbackWater(g, area, ink);
             }
+
+            DrawLightRays(g, area, ink, seconds);
+            DrawParticles(g, area, ink, seconds, state, front: false);
+            DrawCritters(g, area, ink, seconds, state);
+            DrawBubbles(g, area, ink, seconds, state, _backBubbles);
+
+            DrawTurtle(g, area, seconds, state);
+
+            DrawBubbles(g, area, ink, seconds, state, _frontBubbles);
+            DrawParticles(g, area, ink, seconds, state, front: true);
+
+            if (_foreground is not null)
+                DrawImageCover(g, _foreground, area,
+                    (float)Math.Sin(seconds * 0.15 + 1.1) * -4f, 0, 0.88f);
+
+            if (state == AnimationState.Completing)
+            {
+                var remaining = Math.Clamp((_completionUntilUtc - now).TotalSeconds / 3.0, 0, 1);
+                DrawCompletionBurst(g, area, ink, seconds, (int)(110 * remaining));
+            }
+
+            DrawVignette(g, area, ink);
         }
 
         private void DrawTurtle(Graphics g, Rectangle area, double seconds, AnimationState state)
@@ -511,18 +544,7 @@ internal static class TransferAnimationIntegration
                     farFlipperAngle,
                     alpha);
 
-                using (var attrs = AlphaAttributes(alpha))
-                {
-                    g.DrawImage(
-                        _turtleBody,
-                        Rectangle.Round(new RectangleF(originX, originY, w, h)),
-                        0,
-                        0,
-                        w,
-                        h,
-                        GraphicsUnit.Pixel,
-                        attrs);
-                }
+                DrawImageLayer(g, _turtleBody, originX, originY, alpha);
 
                 DrawLayerAroundPivot(
                     g,
@@ -555,21 +577,43 @@ internal static class TransferAnimationIntegration
                 g.RotateTransform(angle);
                 g.TranslateTransform(-pivot.X, -pivot.Y);
 
-                using var attrs = AlphaAttributes(alpha);
-                g.DrawImage(
-                    layer,
-                    Rectangle.Round(new RectangleF(originX, originY, layer.Width, layer.Height)),
-                    0,
-                    0,
-                    layer.Width,
-                    layer.Height,
-                    GraphicsUnit.Pixel,
-                    attrs);
+                DrawImageLayer(g, layer, originX, originY, alpha);
             }
             finally
             {
                 g.Restore(saved);
             }
+        }
+
+        private static void DrawImageLayer(
+            Graphics g,
+            Image image,
+            float originX,
+            float originY,
+            float alpha)
+        {
+            var dest = Rectangle.Round(new RectangleF(
+                originX,
+                originY,
+                image.Width,
+                image.Height));
+
+            if (alpha >= 0.999f)
+            {
+                g.DrawImage(image, dest);
+                return;
+            }
+
+            using var attrs = AlphaAttributes(alpha);
+            g.DrawImage(
+                image,
+                dest,
+                0,
+                0,
+                image.Width,
+                image.Height,
+                GraphicsUnit.Pixel,
+                attrs);
         }
 
         private static void DrawFallbackWater(Graphics g, Rectangle area, Color ink)
@@ -686,10 +730,10 @@ internal static class TransferAnimationIntegration
         {
             var alpha = state switch
             {
-                AnimationState.Transferring => 24,
-                AnimationState.Completing => 24,
-                AnimationState.Paused => 16,
-                AnimationState.Waiting => 10,
+                AnimationState.Transferring => 58,
+                AnimationState.Completing => 58,
+                AnimationState.Paused => 38,
+                AnimationState.Waiting => 28,
                 _ => 0
             };
 
@@ -879,13 +923,13 @@ internal static class TransferAnimationIntegration
         {
             // Keep the animated workload intentionally small for smooth 60 fps playback:
             // fewer bubbles, but each is more visually distinct.
-            for (var i = 0; i < 10; i++)
+            for (var i = 0; i < 8; i++)
                 _backBubbles.Add(NewBubble(front: false));
 
-            for (var i = 0; i < 7; i++)
+            for (var i = 0; i < 6; i++)
                 _frontBubbles.Add(NewBubble(front: true));
 
-            for (var i = 0; i < 28; i++)
+            for (var i = 0; i < 16; i++)
             {
                 _particles.Add(new ParticleSeed(
                     _random.NextDouble(),
@@ -896,9 +940,9 @@ internal static class TransferAnimationIntegration
                     _random.NextDouble() > 0.72));
             }
 
-            _critters.Add(new CritterSeed(CritterKind.Fish, 0.25f, 0.07, 0.012, 18f, false));
-            _critters.Add(new CritterSeed(CritterKind.Fish, 0.34f, 0.48, 0.009, 14f, true));
-            _critters.Add(new CritterSeed(CritterKind.Ray, 0.52f, 0.77, 0.0065, 23f, true));
+            _critters.Add(new CritterSeed(CritterKind.Fish, 0.25f, 0.16, 0.024, 28f, false));
+            _critters.Add(new CritterSeed(CritterKind.Fish, 0.36f, 0.56, 0.020, 23f, true));
+            _critters.Add(new CritterSeed(CritterKind.Ray, 0.54f, 0.74, 0.015, 34f, true));
         }
 
         private BubbleSeed NewBubble(bool front)
@@ -1030,6 +1074,43 @@ internal static class TransferAnimationIntegration
             Transferring,
             Paused,
             Completing
+        }
+
+
+        private sealed class AnimationSurface : Control
+        {
+            private readonly Controller _owner;
+
+            public AnimationSurface(Controller owner)
+            {
+                _owner = owner;
+                SetStyle(
+                    ControlStyles.UserPaint |
+                    ControlStyles.AllPaintingInWmPaint |
+                    ControlStyles.OptimizedDoubleBuffer |
+                    ControlStyles.Opaque,
+                    true);
+                TabStop = false;
+            }
+
+            protected override void OnPaint(PaintEventArgs e)
+            {
+                _owner.PaintScene(e.Graphics, ClientRectangle);
+            }
+
+            protected override void WndProc(ref Message m)
+            {
+                const int WM_NCHITTEST = 0x0084;
+                const int HTTRANSPARENT = -1;
+
+                if (m.Msg == WM_NCHITTEST)
+                {
+                    m.Result = (IntPtr)HTTRANSPARENT;
+                    return;
+                }
+
+                base.WndProc(ref m);
+            }
         }
     }
 }
