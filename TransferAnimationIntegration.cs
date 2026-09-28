@@ -757,10 +757,12 @@ internal static class TransferAnimationIntegration
 
         private void SeedScene()
         {
-            for (var i = 0; i < 18; i++)
+            // More depth variation: lots of tiny distant bubbles, a mixed middle range,
+            // and only a few large foreground bubbles.
+            for (var i = 0; i < 22; i++)
                 _backBubbles.Add(NewBubble(front: false));
 
-            for (var i = 0; i < 13; i++)
+            for (var i = 0; i < 16; i++)
                 _frontBubbles.Add(NewBubble(front: true));
 
             for (var i = 0; i < 52; i++)
@@ -775,13 +777,55 @@ internal static class TransferAnimationIntegration
             }
         }
 
-        private BubbleSeed NewBubble(bool front) => new(
-            _random.NextDouble(),
-            _random.NextDouble(),
-            0.050 + _random.NextDouble() * 0.11,
-            (front ? 3.5f : 2.2f) + (float)_random.NextDouble() * (front ? 5.5f : 4.2f),
-            3f + (float)_random.NextDouble() * 11f,
-            _random.NextDouble() > 0.22);
+        private BubbleSeed NewBubble(bool front)
+        {
+            var roll = _random.NextDouble();
+
+            float radius;
+            if (!front)
+            {
+                radius = roll switch
+                {
+                    < 0.68 => 1.1f + (float)_random.NextDouble() * 2.0f,
+                    < 0.93 => 3.0f + (float)_random.NextDouble() * 2.2f,
+                    _ => 5.2f + (float)_random.NextDouble() * 2.0f
+                };
+            }
+            else
+            {
+                radius = roll switch
+                {
+                    < 0.42 => 2.4f + (float)_random.NextDouble() * 2.8f,
+                    < 0.82 => 5.0f + (float)_random.NextDouble() * 3.5f,
+                    _ => 8.5f + (float)_random.NextDouble() * 5.5f
+                };
+            }
+
+            // Larger bubbles rise a little faster, which reads more naturally.
+            var speed = 0.032 + radius * 0.0105 + _random.NextDouble() * 0.028;
+
+            // Give a few bubbles mild clustering around three loose columns so the field
+            // doesn't look perfectly uniform.
+            var x = _random.NextDouble();
+            if (_random.NextDouble() < 0.35)
+            {
+                var cluster = _random.Next(3) switch
+                {
+                    0 => 0.22,
+                    1 => 0.52,
+                    _ => 0.78
+                };
+                x = Math.Clamp(cluster + (_random.NextDouble() - 0.5) * 0.16, 0.03, 0.97);
+            }
+
+            return new BubbleSeed(
+                x,
+                _random.NextDouble(),
+                speed,
+                radius,
+                2f + (float)_random.NextDouble() * (front ? 12f : 7f),
+                _random.NextDouble() > 0.18);
+        }
 
         private static Color ContrastInk(Color background)
         {
